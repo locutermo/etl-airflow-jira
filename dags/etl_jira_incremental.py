@@ -14,7 +14,7 @@ from airflow.models.param import Param
 import pytz
 
 from jira_client import JiraClient
-from jira_transformer import JiraTransformer
+from jira_transformer import JiraTransformer, parse_iso_datetime
 from db import DWRepository, get_dw_connection, dw_cursor
 from alerts import notify_webhook_failure
 
@@ -95,23 +95,39 @@ def task_extract_and_stage(**context):
     jql = " AND ".join(jql_parts) + " ORDER BY updated ASC"
 
     client = JiraClient()
+    rules = DWRepository.get_homologation_rules()
+    transformer = JiraTransformer(homologation_rules=rules)
     total_staged = 0
 
     for batch in client.search_issues_incremental(jql=jql, batch_size=100):
+        # 1. Guardar en Staging (JSONB Crudo para Zero-API Backfill)
         DWRepository.upsert_raw_staging(batch)
+
+        # 2. Transformar y cargar atómicamente en Core/EAV/Changelog
+        transformed_batch = [transformer.transform_issue(issue) for issue in batch]
+        DWRepository.upsert_transformed_data(transformed_batch)
+
         total_staged += len(batch)
 
+        # 3. Rastrear avance temporal real
         for issue in batch:
             upd_str = issue.get("fields", {}).get("updated")
             if upd_str:
-                try:
-                    dt = datetime.fromisoformat(upd_str.replace("Z", "+00:00"))
-                    if dt > max_updated_at:
-                        max_updated_at = dt
-                except Exception:
-                    pass
+                dt = parse_iso_datetime(upd_str)
+                if dt and dt > max_updated_at:
+                    max_updated_at = dt
 
-        if max_records_param and total_staged >= max_records_param:
+        # 4. Checkpoint de seguridad en BD cada 500 tickets
+        if total_staged % 500 == 0:
+            DWRepository.update_watermark(
+                pipeline_name="etl_jira_incremental_sync",
+                sync_dt=max_updated_at,
+                records_processed=total_staged,
+                status="RUNNING"
+            )
+            logger.info(f"Checkpoint intermedio: {total_staged} tickets confirmados en DW. Timestamp: {max_updated_at}")
+
+        if max_records_param and max_records_param > 0 and total_staged >= max_records_param:
             logger.info(f"Límite de lote alcanzado ({total_staged}/{max_records_param} tickets). El siguiente lote continuará desde {max_updated_at}.")
             break
 
@@ -119,59 +135,45 @@ def task_extract_and_stage(**context):
     context['ti'].xcom_push(key='buffered_sync_iso', value=buffered_sync.isoformat())
     context['ti'].xcom_push(key='max_updated_iso', value=max_updated_at.isoformat())
     context['ti'].xcom_push(key='project_keys_param', value=str(project_keys_param))
-    logger.info(f"Extracción finalizada. Total registros en Staging: {total_staged}")
+    logger.info(f"Ciclo finalizado. Total acumulado y confirmado en DW: {total_staged} registros.")
 
 def task_transform_and_load(**context):
     """
-    Toma los registros de Staging afectados desde la fecha del buffer,
-    los procesa con JiraTransformer y los carga en las tablas dimensionales y hechos.
+    Capa de reconciliación y garantía de consistencia:
+    Verifica que todo registro presente en Staging esté íntegramente transformado en Core.
+    Si algún registro quedó rezagado por fallos previos, lo transforma y confirma.
     """
     ti = context['ti']
     total_staged = ti.xcom_pull(task_ids='extract_and_stage', key='total_staged') or 0
     buffered_sync_iso = ti.xcom_pull(task_ids='extract_and_stage', key='buffered_sync_iso')
 
-    if total_staged == 0 and not buffered_sync_iso:
-        logger.info("No hay registros nuevos o modificados para transformar.")
-        return
-
     buffered_sync = datetime.fromisoformat(buffered_sync_iso) if buffered_sync_iso else datetime(2020, 1, 1, tzinfo=pytz.UTC)
 
-    # Cargar reglas de homologación
     rules = DWRepository.get_homologation_rules()
     transformer = JiraTransformer(homologation_rules=rules)
 
-    # Leer lotes desde Staging en chunks
-    chunk_size = 500
-    offset = 0
-
     conn = get_dw_connection()
+    reconciled_count = 0
     try:
-        while True:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT raw_payload
-                    FROM stg_jira_issues_raw
-                    WHERE updated_at >= %s
-                    ORDER BY updated_at ASC
-                    LIMIT %s OFFSET %s;
-                """, (buffered_sync, chunk_size, offset))
-                rows = cur.fetchall()
+        with conn.cursor() as cur:
+            # Buscar tickets en staging que no estén en core o estén desactualizados
+            cur.execute("""
+                SELECT s.raw_payload
+                FROM stg_jira_issues_raw s
+                LEFT JOIN fact_jira_issues_core c ON s.issue_id = c.issue_id
+                WHERE s.updated_at >= %s
+                  AND (c.issue_id IS NULL OR c.updated_at < s.updated_at)
+                LIMIT 1000;
+            """, (buffered_sync,))
+            missing_rows = cur.fetchall()
 
-            if not rows:
-                break
-
-            transformed_batch = []
-            for row in rows:
-                raw_payload = row[0]
-                transformed = transformer.transform_issue(raw_payload)
-                transformed_batch.append(transformed)
-
-            DWRepository.upsert_transformed_data(transformed_batch)
-            offset += len(rows)
-            logger.info(f"Transformados y cargados {offset} tickets...")
-
-            if len(rows) < chunk_size:
-                break
+        if missing_rows:
+            transformed = [transformer.transform_issue(r[0]) for r in missing_rows]
+            DWRepository.upsert_transformed_data(transformed)
+            reconciled_count = len(missing_rows)
+            logger.info(f"Reconciliación: {reconciled_count} registros rezagados fueron transformados y sincronizados en Core.")
+        else:
+            logger.info("Verificación de consistencia: 100% de los tickets en Staging ya están confirmados en Core.")
     finally:
         conn.close()
 
