@@ -390,10 +390,16 @@ class JiraTransformer:
             created_dt = parse_iso_datetime(hist.get("created"))
 
             items = hist.get("items", [])
+            seen_fields_in_hist: Dict[str, int] = {}
             for item in items:
                 f_name = item.get("field", "").lower()
                 f_id = item.get("fieldId")
-                item_key = f"{hist_id}_{f_name}"
+                count = seen_fields_in_hist.get(f_name, 0)
+                seen_fields_in_hist[f_name] = count + 1
+                if count == 0:
+                    item_key = f"{hist_id}_{f_name}"[:120]
+                else:
+                    item_key = f"{hist_id}_{f_name}_{count}"[:120]
 
                 changelog_entries.append({
                     "changelog_item_key": item_key,

@@ -116,8 +116,9 @@ class DWRepository:
     def upsert_fields(fields: List[Dict[str, Any]]):
         if not fields:
             return
+        field_dict = {f["id"]: f for f in fields if "id" in f}
         tuples = []
-        for f in fields:
+        for f in field_dict.values():
             schema = f.get("schema", {})
             tuples.append((
                 f["id"],
@@ -151,9 +152,11 @@ class DWRepository:
         """Guarda los lotes JSON íntegros en stg_jira_issues_raw para Zero-API Backfill."""
         if not issues:
             return
+        
+        # Deduplicar por issue_id dentro del mismo lote para evitar CardinalityViolation
+        issue_dict = {int(issue["id"]): issue for issue in issues if "id" in issue}
         tuples = []
-        for issue in issues:
-            i_id = int(issue["id"])
+        for i_id, issue in issue_dict.items():
             i_key = issue["key"]
             fields = issue.get("fields", {})
             proj = fields.get("project", {})
@@ -177,7 +180,7 @@ class DWRepository:
 
     @staticmethod
     def upsert_transformed_data(transformed_batch: List[Dict[str, Any]]):
-        """Inserta en bloque las capas dimensionales y de hechos."""
+        """Inserta en bloque las capas dimensionales y de hechos garantizando unicidad estricta para evitar CardinalityViolation."""
         all_users = []
         all_core = []
         all_jsm = []
@@ -194,9 +197,9 @@ class DWRepository:
             all_changelog.extend(item.get("changelog", []))
 
         with dw_cursor() as cur:
-            # 1. Users
+            # 1. Dim Users (Deduplicar por account_id)
             if all_users:
-                user_dict = {u["account_id"]: u for u in all_users}
+                user_dict = {u["account_id"]: u for u in all_users if u.get("account_id")}
                 u_tuples = [(u["account_id"], u["display_name"], u["email_address"], u["is_active"], u["account_type"]) for u in user_dict.values()]
                 execute_values(cur, """
                     INSERT INTO dim_jira_user (account_id, display_name, email_address, is_active, account_type)
@@ -208,8 +211,9 @@ class DWRepository:
                         last_synced_at = CURRENT_TIMESTAMP;
                 """, u_tuples)
 
-            # 2. Fact Core
+            # 2. Fact Core (Deduplicar por issue_id)
             if all_core:
+                core_dict = {c["issue_id"]: c for c in all_core if c.get("issue_id")}
                 core_tuples = [
                     (
                         c["issue_id"], c["issue_key"], c["project_id"], c["project_key"], c["summary"], c["description_plain"],
@@ -220,7 +224,7 @@ class DWRepository:
                         c["sprint_name"], c["story_points"], c["labels_csv"], c["components_csv"],
                         c["created_at"], c["updated_at"], c["resolved_at"], c["due_date"], c["lead_time_seconds"], c["is_deleted"]
                     )
-                    for c in all_core
+                    for c in core_dict.values()
                 ]
                 execute_values(cur, """
                     INSERT INTO fact_jira_issues_core (
@@ -266,8 +270,9 @@ class DWRepository:
                         dw_updated_at = CURRENT_TIMESTAMP;
                 """, core_tuples)
 
-            # 3. Fact JSM
+            # 3. Fact JSM (Deduplicar por issue_id)
             if all_jsm:
+                jsm_dict = {j["issue_id"]: j for j in all_jsm if j.get("issue_id")}
                 jsm_tuples = [
                     (
                         j["issue_id"], j["project_key"], j["service_desk_id"], j["request_type_id"],
@@ -276,7 +281,7 @@ class DWRepository:
                         j["sla_resolution_target_sec"], j["sla_resolution_elapsed_sec"], j["sla_resolution_breached"],
                         j["csat_rating"], j["csat_comment"]
                     )
-                    for j in all_jsm
+                    for j in jsm_dict.values()
                 ]
                 execute_values(cur, """
                     INSERT INTO fact_jsm_requests (
@@ -302,14 +307,15 @@ class DWRepository:
                         dw_updated_at = CURRENT_TIMESTAMP;
                 """, jsm_tuples)
 
-            # 4. Custom Values EAV
+            # 4. Custom Values EAV (Deduplicar por (issue_id, canonical_name))
             if all_custom:
+                custom_dict = {(cv["issue_id"], cv["canonical_name"]): cv for cv in all_custom if cv.get("issue_id") and cv.get("canonical_name")}
                 cv_tuples = [
                     (
                         cv["issue_id"], cv["project_key"], cv["field_id"], cv["canonical_name"],
                         cv["val_text"], cv["val_number"], cv["val_timestamp"], cv["val_account_id"]
                     )
-                    for cv in all_custom
+                    for cv in custom_dict.values()
                 ]
                 execute_values(cur, """
                     INSERT INTO fact_issue_custom_values (
@@ -324,8 +330,9 @@ class DWRepository:
                         val_account_id = EXCLUDED.val_account_id;
                 """, cv_tuples)
 
-            # 5. Changelog
+            # 5. Changelog (Deduplicar por changelog_item_key)
             if all_changelog:
+                ch_dict = {ch["changelog_item_key"]: ch for ch in all_changelog if ch.get("changelog_item_key")}
                 ch_tuples = [
                     (
                         ch["changelog_item_key"], ch["changelog_id"], ch["issue_id"], ch["project_key"],
@@ -333,7 +340,7 @@ class DWRepository:
                         ch["from_string"], ch["from_value_id"], ch["to_string"], ch["to_value_id"],
                         ch["changed_at"]
                     )
-                    for ch in all_changelog
+                    for ch in ch_dict.values()
                 ]
                 execute_values(cur, """
                     INSERT INTO fact_jira_changelog (
