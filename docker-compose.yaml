@@ -9,7 +9,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow_pass_gobierno}@postgres-airflow/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__DEFAULT_TIMEZONE: 'America/Lima'
-    AIRFLOW__CORE__DEFAULT_UI_TIMEZONE: 'America/Lima'
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: 'America/Lima'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__WEBSERVER__SECRET_KEY: 'secret_key_gobierno_ti_2026_xyz'
     JIRA_BASE_URL: ${JIRA_BASE_URL:-https://integratelperu.atlassian.net}
