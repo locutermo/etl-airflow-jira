@@ -191,24 +191,35 @@ with tab_daily:
 
         with col_left:
             st.markdown(f"#### Campos Homologados en `{selected_proj}`")
+            
+            # Obtener total de issues del proyecto para el cálculo de cobertura
+            df_tot = run_query(
+                "SELECT COUNT(*) FROM fact_jira_issues_core WHERE project_key = %s AND is_deleted = FALSE;",
+                (selected_proj,)
+            )
+            total_proj_issues = int(df_tot.iloc[0, 0]) if not df_tot.empty else 0
+
             df_mapped = run_query("""
                 SELECT 
                     h.field_id AS "ID Campo",
                     c.field_name_jira AS "Nombre en Jira",
                     'cf_' || h.canonical_name AS "Columna en BD",
                     h.normalization_strategy AS "Estrategia",
-                    COUNT(eav.val_text) AS "Tickets con Valor",
-                    ROUND(COUNT(eav.val_text) * 100.0 / NULLIF((SELECT COUNT(*) FROM fact_jira_issues_core WHERE project_key = %s AND is_deleted = FALSE), 0), 1) AS "%% Cobertura"
+                    COUNT(eav.val_text) AS "Tickets con Valor"
                 FROM meta_field_homologation h
                 JOIN meta_jira_field_catalog c ON h.field_id = c.field_id
                 LEFT JOIN fact_issue_custom_values eav 
-                    ON (eav.canonical_name = h.canonical_name OR eav.canonical_name LIKE h.canonical_name || '_%')
+                    ON (eav.canonical_name = h.canonical_name OR eav.canonical_name LIKE concat(h.canonical_name, '_%%'))
                    AND eav.project_key = %s
                 WHERE h.project_key = %s OR h.project_key = 'ALL'
                 GROUP BY h.field_id, c.field_name_jira, h.canonical_name, h.normalization_strategy;
-            """, (selected_proj, selected_proj, selected_proj))
+            """, (selected_proj, selected_proj))
 
             if not df_mapped.empty:
+                if total_proj_issues > 0:
+                    df_mapped["% Cobertura"] = (df_mapped["Tickets con Valor"] * 100.0 / total_proj_issues).round(1).astype(str) + " %"
+                else:
+                    df_mapped["% Cobertura"] = "0.0 %"
                 st.dataframe(df_mapped, use_container_width=True, hide_index=True)
             else:
                 st.caption(f"No hay campos personalizados homologados específicamente para `{selected_proj}`.")
