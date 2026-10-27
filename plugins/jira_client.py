@@ -155,24 +155,11 @@ class JiraClient:
             if next_page_token:
                 payload["nextPageToken"] = next_page_token
 
-            # Intentar primero con el endpoint moderno /rest/api/3/search/jql
-            try:
-                resp = self._request("POST", "/rest/api/3/search/jql", json=payload)
-                data = resp.json()
-                issues = data.get("issues", [])
-                next_page_token = data.get("nextPageToken")
-                has_more = bool(next_page_token) and len(issues) > 0
-            except Exception as e:
-                # Fallback a /rest/api/3/search si /search/jql no está habilitado
-                logger.info(f"Usando endpoint alternativo /rest/api/3/search por: {e}")
-                payload.pop("nextPageToken", None)
-                payload["startAt"] = total_extracted
-                resp = self._request("POST", "/rest/api/3/search", json=payload)
-                data = resp.json()
-                issues = data.get("issues", [])
-                total_in_query = data.get("total", 0)
-                total_extracted += len(issues)
-                has_more = total_extracted < total_in_query and len(issues) > 0
+            resp = self._request("POST", "/rest/api/3/search/jql", json=payload)
+            data = resp.json()
+            issues = data.get("issues", [])
+            next_page_token = data.get("nextPageToken")
+            has_more = bool(next_page_token) and len(issues) > 0
 
             if issues:
                 total_extracted += len(issues)
