@@ -132,6 +132,8 @@ services:
       AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin_gobierno_2026}
     ports:
       - "8501:8501"
+    volumes:
+      - ./ui:/app
     depends_on:
       postgres-dw:
         condition: service_healthy
