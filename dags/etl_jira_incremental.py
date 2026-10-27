@@ -1,7 +1,8 @@
 """
 DAG Principal: Extracción Incremental y Carga Analítica de Jira Cloud.
-Frecuencia: Cada 30 minutos.
-Implementa el buffer de seguridad de 15 minutos, paginación por nextPageToken,
+Frecuencia: Cada hora (ajustable).
+Sin límite de registros por defecto: extrae TODOS los issues disponibles.
+Implementa buffer de seguridad de 15 minutos, paginación por nextPageToken,
 storing raw JSONB (Zero-API backfill), normalización dimensional y cálculo de tiempos.
 """
 
@@ -29,6 +30,7 @@ default_args = {
     'email_on_retry': False,
     'retries': 2,
     'retry_delay': timedelta(minutes=3),
+    'execution_timeout': timedelta(hours=8),
     'on_failure_callback': notify_webhook_failure,
 }
 
@@ -51,7 +53,7 @@ def task_extract_and_stage(**context):
     params = context.get('params', {})
     project_keys_param = params.get('project_keys', 'ALL')
     since_date_param = params.get('since_date', '')
-    max_records_param = int(params.get('max_records', 500) or 500)
+    max_records_param = int(params.get('max_records', 0) or 0)
 
     # 1. Determinar fecha base (Watermark o manual) en America/Lima
     if since_date_param and str(since_date_param).strip():
@@ -134,7 +136,9 @@ def task_extract_and_stage(**context):
                 records_processed=total_staged,
                 status="RUNNING"
             )
-            logger.info(f"Checkpoint intermedio: {total_staged} tickets confirmados en DW. Timestamp: {max_updated_at}")
+            logger.info(f"Checkpoint intermedio: {total_staged} tickets confirmados en DW. Watermark: {max_updated_at}")
+        elif total_staged % 100 == 0:
+            logger.info(f"Progreso: {total_staged} tickets extraídos. Último updated_at: {max_updated_at}")
 
         if max_records_param and max_records_param > 0 and total_staged >= max_records_param:
             logger.info(f"Límite de lote alcanzado ({total_staged}/{max_records_param} tickets). El siguiente lote continuará desde {max_updated_at}.")
@@ -217,8 +221,8 @@ def task_calculate_intervals_and_stats(**context):
 with DAG(
     'etl_jira_incremental_sync',
     default_args=default_args,
-    description='Sincronización incremental cada 30 min de Jira Cloud a PostgreSQL DW',
-    schedule_interval='*/30 * * * *',
+    description='Sincronización incremental cada hora de Jira Cloud a PostgreSQL DW',
+    schedule_interval='0 * * * *',
     start_date=datetime(2026, 1, 1, tzinfo=LIMA_TZ),
     catchup=False,
     max_active_runs=1,
@@ -229,9 +233,9 @@ with DAG(
             description='Prefijos de proyectos a extraer separados por coma (ej. MESA, TI) o ALL para todos los activos'
         ),
         'max_records': Param(
-            500,
+            0,
             type='integer',
-            description='Cantidad máxima de tickets a extraer en este lote'
+            description='Cantidad máxima de tickets a extraer (0 = sin límite, extrae TODO)'
         ),
         'since_date': Param(
             '',
