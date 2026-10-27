@@ -13,17 +13,19 @@ from psycopg2.extras import execute_values, Json
 logger = logging.getLogger(__name__)
 
 def get_dw_connection():
-    """Obtiene una conexión a postgres-dw utilizando DW_CONN_URI o variables de entorno individuales."""
+    """Obtiene una conexión a postgres-dw utilizando DW_CONN_URI o variables de entorno individuales con timezone America/Lima."""
+    tz_options = "-c timezone=America/Lima"
     conn_uri = os.getenv("DW_CONN_URI")
     if conn_uri:
-        return psycopg2.connect(conn_uri)
+        return psycopg2.connect(conn_uri, options=tz_options)
     
     return psycopg2.connect(
         host=os.getenv("DW_HOST", "postgres-dw"),
         port=int(os.getenv("DW_PORT", "5432")),
         dbname=os.getenv("DW_DB", "jira_dw"),
         user=os.getenv("DW_USER", "dw_admin"),
-        password=os.getenv("DW_PASSWORD", "dw_pass_gobierno_2026")
+        password=os.getenv("DW_PASSWORD", "dw_pass_gobierno_2026"),
+        options=tz_options
     )
 
 @contextmanager

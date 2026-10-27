@@ -32,13 +32,14 @@ AIRFLOW_USER = os.getenv("AIRFLOW_USER", "admin")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "admin_gobierno_2026")
 
 def get_db_connection():
-    """Conexión hacia el Data Warehouse analítico."""
+    """Conexión hacia el Data Warehouse analítico con timezone configurado en America/Lima."""
     return psycopg2.connect(
         host=DW_HOST,
         port=DW_PORT,
         dbname=DW_NAME,
         user=DW_USER,
-        password=DW_PASSWORD
+        password=DW_PASSWORD,
+        options="-c timezone=America/Lima"
     )
 
 def run_query(query: str, params=None) -> pd.DataFrame:
@@ -127,7 +128,12 @@ with tab_daily:
             status_str = f"🔴 ERROR ({w_status})"
         last_dt = df_watermark.iloc[0]["last_successful_sync"]
         if last_dt is not None:
-            last_sync_str = pd.to_datetime(last_dt).strftime("%d/%m/%Y %H:%M")
+            dt_ts = pd.to_datetime(last_dt)
+            if dt_ts.tzinfo is None:
+                dt_ts = dt_ts.tz_localize('America/Lima')
+            else:
+                dt_ts = dt_ts.tz_convert('America/Lima')
+            last_sync_str = dt_ts.strftime("%d/%m/%Y %H:%M (GMT-5)")
 
     col1.metric("Estado del Pipeline", status_str, f"Último Sync: {last_sync_str}")
 

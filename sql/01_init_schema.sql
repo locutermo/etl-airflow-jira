@@ -245,8 +245,8 @@ CREATE TABLE IF NOT EXISTS fact_issue_transitions (
 CREATE INDEX IF NOT EXISTS idx_transitions_bi_fast ON fact_issue_transitions(project_key, field_name, field_value);
 CREATE INDEX IF NOT EXISTS idx_transitions_issue_id ON fact_issue_transitions(issue_id);
 
--- Inicializar Watermark por defecto si no existe
+-- Inicializar Watermark por defecto si no existe (Zona Horaria America/Lima GMT-5)
 INSERT INTO meta_etl_watermarks (pipeline_name, last_successful_sync, status)
-VALUES ('etl_jira_incremental_sync', '2020-01-01 00:00:00+00', 'SUCCESS')
+VALUES ('etl_jira_incremental_sync', '2020-01-01 00:00:00-05', 'SUCCESS')
 ON CONFLICT (pipeline_name) DO NOTHING;
 

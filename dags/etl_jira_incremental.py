@@ -20,6 +20,8 @@ from alerts import notify_webhook_failure
 
 logger = logging.getLogger(__name__)
 
+LIMA_TZ = pytz.timezone("America/Lima")
+
 default_args = {
     'owner': 'gobierno-ti',
     'depends_on_past': False,
@@ -51,21 +53,28 @@ def task_extract_and_stage(**context):
     since_date_param = params.get('since_date', '')
     max_records_param = int(params.get('max_records', 500) or 500)
 
-    # 1. Determinar fecha base (Watermark o manual)
+    # 1. Determinar fecha base (Watermark o manual) en America/Lima
     if since_date_param and str(since_date_param).strip():
         watermark_str = str(since_date_param).strip()
-        try:
-            buffered_sync = datetime.fromisoformat(watermark_str.replace("Z", "+00:00"))
-        except Exception:
-            buffered_sync = datetime.strptime(watermark_str[:16], "%Y-%m-%d %H:%M").replace(tzinfo=pytz.UTC)
+        buffered_sync = parse_iso_datetime(watermark_str)
+        if not buffered_sync:
+            try:
+                dt_naive = datetime.strptime(watermark_str[:16], "%Y-%m-%d %H:%M")
+                buffered_sync = LIMA_TZ.localize(dt_naive)
+            except Exception:
+                buffered_sync = datetime(2020, 1, 1, 0, 0, 0, tzinfo=LIMA_TZ)
         max_updated_at = buffered_sync
     else:
         pipeline_name = "etl_jira_incremental_sync"
         watermark_info = DWRepository.get_watermark(pipeline_name)
         if watermark_info and watermark_info.get("last_successful_sync"):
             last_sync = watermark_info["last_successful_sync"]
+            if last_sync.tzinfo is None:
+                last_sync = LIMA_TZ.localize(last_sync)
+            else:
+                last_sync = last_sync.astimezone(LIMA_TZ)
         else:
-            last_sync = datetime(2020, 1, 1, tzinfo=pytz.UTC)
+            last_sync = datetime(2020, 1, 1, 0, 0, 0, tzinfo=LIMA_TZ)
         buffered_sync = last_sync - timedelta(minutes=15)
         watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
         max_updated_at = last_sync
@@ -147,7 +156,7 @@ def task_transform_and_load(**context):
     total_staged = ti.xcom_pull(task_ids='extract_and_stage', key='total_staged') or 0
     buffered_sync_iso = ti.xcom_pull(task_ids='extract_and_stage', key='buffered_sync_iso')
 
-    buffered_sync = datetime.fromisoformat(buffered_sync_iso) if buffered_sync_iso else datetime(2020, 1, 1, tzinfo=pytz.UTC)
+    buffered_sync = parse_iso_datetime(buffered_sync_iso) if buffered_sync_iso else datetime(2020, 1, 1, 0, 0, 0, tzinfo=LIMA_TZ)
 
     rules = DWRepository.get_homologation_rules()
     transformer = JiraTransformer(homologation_rules=rules)
@@ -187,8 +196,8 @@ def task_calculate_intervals_and_stats(**context):
     max_updated_iso = ti.xcom_pull(task_ids='extract_and_stage', key='max_updated_iso')
     total_staged = ti.xcom_pull(task_ids='extract_and_stage', key='total_staged') or 0
 
-    buffered_sync = datetime.fromisoformat(buffered_sync_iso) if buffered_sync_iso else datetime.now(pytz.UTC)
-    max_updated = datetime.fromisoformat(max_updated_iso) if max_updated_iso else datetime.now(pytz.UTC)
+    buffered_sync = parse_iso_datetime(buffered_sync_iso) if buffered_sync_iso else datetime.now(LIMA_TZ)
+    max_updated = parse_iso_datetime(max_updated_iso) if max_updated_iso else datetime.now(LIMA_TZ)
 
     # 1. Calcular permanencia en segundos (sp_calculate_changelog_intervals)
     DWRepository.call_sp_calculate_changelog_intervals(buffered_sync)
@@ -210,7 +219,7 @@ with DAG(
     default_args=default_args,
     description='Sincronización incremental cada 30 min de Jira Cloud a PostgreSQL DW',
     schedule_interval='*/30 * * * *',
-    start_date=datetime(2026, 1, 1),
+    start_date=datetime(2026, 1, 1, tzinfo=LIMA_TZ),
     catchup=False,
     max_active_runs=1,
     params={

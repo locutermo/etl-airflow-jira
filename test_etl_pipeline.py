@@ -38,7 +38,7 @@ def run_tests():
         client = JiraClient()
         issues_batch = None
         # Probar extrayendo solo 2 issues de cualquier proyecto
-        for batch in client.search_issues_incremental(jql="ORDER BY updated DESC", batch_size=2):
+        for batch in client.search_issues_incremental(jql='updated >= "2024-01-01" ORDER BY updated DESC', batch_size=2):
             issues_batch = batch
             break
 
@@ -82,7 +82,8 @@ def run_tests():
 
     logger.info("=== 6. TEST STORED PROCEDURE: sp_calculate_changelog_intervals ===")
     try:
-        DWRepository.call_sp_calculate_changelog_intervals(datetime(2020, 1, 1, tzinfo=pytz.UTC))
+        lima_tz = pytz.timezone("America/Lima")
+        DWRepository.call_sp_calculate_changelog_intervals(datetime(2020, 1, 1, tzinfo=lima_tz))
         logger.info("TEST EXITOSO: Procedimiento sp_calculate_changelog_intervals ejecutado correctamente.")
     except Exception as e:
         logger.error(f"Fallo en sp_calculate_changelog_intervals: {e}")
@@ -102,4 +103,3 @@ def run_tests():
 if __name__ == "__main__":
     success = run_tests()
     sys.exit(0 if success else 1)
-

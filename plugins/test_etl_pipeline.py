@@ -82,7 +82,8 @@ def run_tests():
 
     logger.info("=== 6. TEST STORED PROCEDURE: sp_calculate_changelog_intervals ===")
     try:
-        DWRepository.call_sp_calculate_changelog_intervals(datetime(2020, 1, 1, tzinfo=pytz.UTC))
+        lima_tz = pytz.timezone("America/Lima")
+        DWRepository.call_sp_calculate_changelog_intervals(datetime(2020, 1, 1, tzinfo=lima_tz))
         logger.info("TEST EXITOSO: Procedimiento sp_calculate_changelog_intervals ejecutado correctamente.")
     except Exception as e:
         logger.error(f"Fallo en sp_calculate_changelog_intervals: {e}")

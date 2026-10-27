@@ -7,11 +7,14 @@ import json
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
+import pytz
 
 logger = logging.getLogger(__name__)
 
+LIMA_TZ = pytz.timezone("America/Lima")
+
 def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
-    """Convierte cadenas ISO 8601 de Jira (ej. 2026-03-15T14:30:00.000-0500) a objetos datetime."""
+    """Convierte cadenas ISO 8601 de Jira a objetos datetime normalizados en America/Lima (GMT-5)."""
     if not dt_str:
         return None
     try:
@@ -19,10 +22,16 @@ def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
         clean_str = dt_str.replace("Z", "+00:00")
         if len(clean_str) > 23 and (clean_str[-5] in ('+', '-')) and clean_str[-3] != ':':
             clean_str = clean_str[:-2] + ':' + clean_str[-2:]
-        return datetime.fromisoformat(clean_str)
+        dt = datetime.fromisoformat(clean_str)
+        if dt.tzinfo is None:
+            dt = LIMA_TZ.localize(dt)
+        else:
+            dt = dt.astimezone(LIMA_TZ)
+        return dt
     except Exception:
         try:
-            return datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
+            dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
+            return LIMA_TZ.localize(dt)
         except Exception:
             return None
 

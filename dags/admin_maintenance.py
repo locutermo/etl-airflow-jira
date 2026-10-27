@@ -9,11 +9,14 @@ import logging
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
+import pytz
 
 from db import get_dw_connection, DWRepository
 from alerts import notify_webhook_failure
 
 logger = logging.getLogger(__name__)
+
+LIMA_TZ = pytz.timezone("America/Lima")
 
 default_args = {
     'owner': 'gobierno-ti',
@@ -97,7 +100,7 @@ with DAG(
     default_args=default_args,
     description='Mantenimiento y regularización histórica (Zero-API Backfill, migración de prefijos y vistas)',
     schedule_interval=None, # Ejecución manual / API
-    start_date=datetime(2026, 1, 1),
+    start_date=datetime(2026, 1, 1, tzinfo=LIMA_TZ),
     catchup=False,
     max_active_runs=1,
     params={

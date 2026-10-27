@@ -8,12 +8,15 @@ from datetime import datetime, timedelta
 import logging
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+import pytz
 
 from jira_client import JiraClient
 from db import get_dw_connection, DWRepository
 from alerts import notify_webhook_failure
 
 logger = logging.getLogger(__name__)
+
+LIMA_TZ = pytz.timezone("America/Lima")
 
 default_args = {
     'owner': 'gobierno-ti',
@@ -90,8 +93,8 @@ with DAG(
     'etl_jira_reconciliation_deletes',
     default_args=default_args,
     description='Reconciliación nocturna de tickets eliminados en Jira Cloud vía Jira Expressions API',
-    schedule_interval='0 3 * * *', # 3:00 AM diario
-    start_date=datetime(2026, 1, 1),
+    schedule_interval='0 3 * * *', # 3:00 AM diario (America/Lima)
+    start_date=datetime(2026, 1, 1, tzinfo=LIMA_TZ),
     catchup=False,
     max_active_runs=1,
     tags=['jira', 'reconciliation', 'deletes', 'gobierno-ti'],
