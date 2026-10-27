@@ -1,0 +1,172 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__RELOAD_ON_PLUGIN_CHANGE: 'true'
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow_pass_gobierno}@postgres-airflow/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: 'America/Lima'
+    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'secret_key_gobierno_ti_2026_xyz'
+    JIRA_BASE_URL: ${JIRA_BASE_URL:-https://integratelperu.atlassian.net}
+    JIRA_USER_EMAIL: ${JIRA_USER_EMAIL:-usuario@integratelperu.com}
+    JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+    DW_CONN_URI: postgresql://${DW_USER:-dw_admin}:${DW_PASSWORD:-dw_pass_gobierno_2026}@postgres-dw:5432/${DW_DB:-jira_dw}
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-5000}:0"
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+    postgres-dw:
+      condition: service_healthy
+
+services:
+  # 1. Base de Datos Interna de Airflow
+  postgres-airflow:
+    image: postgres:15-alpine
+    container_name: gobti-airflow-metadb
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass_gobierno}
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_metadb_vol:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${AIRFLOW_DB_USER:-airflow}"]
+      interval: 10s
+      retries: 5
+    restart: always
+
+  # 2. Data Warehouse Analítico de Jira (PostgreSQL 16)
+  postgres-dw:
+    image: postgres:16-alpine
+    container_name: gobti-jira-dw
+    environment:
+      POSTGRES_USER: ${DW_USER:-dw_admin}
+      POSTGRES_PASSWORD: ${DW_PASSWORD:-dw_pass_gobierno_2026}
+      POSTGRES_DB: ${DW_DB:-jira_dw}
+      TZ: 'America/Lima'
+    ports:
+      - "5433:5432" # Expuesto para Power BI Gateway / Desktop
+    volumes:
+      - jira_dw_vol:/var/lib/postgresql/data
+      - ./sql:/docker-entrypoint-initdb.d
+    command: >
+      postgres -c shared_buffers=1GB
+               -c effective_cache_size=3GB
+               -c work_mem=64MB
+               -c maintenance_work_mem=256MB
+               -c max_parallel_workers_per_gather=2
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DW_USER:-dw_admin}", "-d", "${DW_DB:-jira_dw}"]
+      interval: 10s
+      retries: 5
+    restart: always
+
+  # 3. Inicializador de Airflow
+  airflow-init:
+    <<: *airflow-common
+    container_name: gobti-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /sources/logs /sources/dags /sources/plugins
+        chown -R "${AIRFLOW_UID:-5000}:0" /sources/{logs,dags,plugins}
+        /entrypoint airflow db migrate
+        /entrypoint airflow users create \
+          --username "${_AIRFLOW_USR_USER:-admin}" \
+          --password "${_AIRFLOW_PW_USER:-admin_gobierno_2026}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com || true
+        echo "Airflow init completado con éxito."
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_CREATE_USER: 'true'
+      _AIRFLOW_USR_USER: ${AIRFLOW_ADMIN_USER:-admin}
+      _AIRFLOW_PW_USER: ${AIRFLOW_ADMIN_PASSWORD:-admin_gobierno_2026}
+      _AIRFLOW_ROLE_USER: 'Admin'
+    user: "0:0"
+    volumes:
+      - ./:/sources
+
+  # 4. Airflow Webserver
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: gobti-airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+
+  # 5. Airflow Scheduler
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: gobti-airflow-scheduler
+    command: scheduler
+    restart: always
+
+  # 6. Portal UI Operativo & Daily Tracker (Streamlit)
+  etl-admin-ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile.ui
+    container_name: gobti-jira-ui
+    environment:
+      DW_HOST: postgres-dw
+      DW_PORT: 5432
+      DW_NAME: ${DW_DB:-jira_dw}
+      DW_USER: ${DW_USER:-dw_admin}
+      DW_PASSWORD: ${DW_PASSWORD:-dw_pass_gobierno_2026}
+      AIRFLOW_API_URL: http://airflow-webserver:8080/api/v1
+      AIRFLOW_USER: ${AIRFLOW_ADMIN_USER:-admin}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin_gobierno_2026}
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres-dw:
+        condition: service_healthy
+    restart: always
+
+  # 7. Túnel Ngrok para Seguimiento en Dailys
+  ngrok-tunnel:
+    image: ngrok/ngrok:latest
+    container_name: gobti-ngrok-tunnel
+    command:
+      - "http"
+      - "etl-admin-ui:8501"
+      - "--basic-auth=${NGROK_USER:-gobierno}:${NGROK_PASSWORD:-gobierno_pass_2026}"
+      - "--domain=${NGROK_STATIC_DOMAIN:-}"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+    ports:
+      - "4040:4040"
+    depends_on:
+      - etl-admin-ui
+    restart: unless-stopped
+
+  # 8. Monitoreo de Recursos de Contenedores
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: gobti-cadvisor
+    ports:
+      - "8085:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    restart: always
+
+volumes:
+  airflow_metadb_vol:
+  jira_dw_vol:

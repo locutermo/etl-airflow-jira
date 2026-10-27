@@ -1,0 +1,19 @@
+# Entornos y Secretos
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Airflow Logs y runtime
+logs/
+airflow.cfg
+airflow.db
+
+# Docker data local
+.docker/
+
