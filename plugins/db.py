@@ -37,10 +37,18 @@ def dw_cursor():
             yield cur
         conn.commit()
     except Exception:
-        conn.rollback()
+        try:
+            if conn and not conn.closed:
+                conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
-        conn.close()
+        try:
+            if conn and not conn.closed:
+                conn.close()
+        except Exception:
+            pass
 
 class DWRepository:
     """Repositorio de operaciones analíticas en PostgreSQL Data Warehouse."""
