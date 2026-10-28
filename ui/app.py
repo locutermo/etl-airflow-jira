@@ -638,8 +638,35 @@ with tab_model:
         </style>
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
         <script>
+            // Protección contra paths con longitud cero en motores Chromium (getPointAtLength)
+            (function() {{
+                function safeGetPointAtLength(origFn) {{
+                    return function(val) {{
+                        try {{
+                            if (typeof this.getTotalLength === 'function') {{
+                                const total = this.getTotalLength();
+                                if (!total || isNaN(total) || total <= 0) {{
+                                    return {{ x: 0, y: 0 }};
+                                }}
+                            }}
+                            return origFn.call(this, val);
+                        }} catch (e) {{
+                            return {{ x: 0, y: 0 }};
+                        }}
+                    }};
+                }}
+
+                if (window.SVGGeometryElement && SVGGeometryElement.prototype.getPointAtLength) {{
+                    SVGGeometryElement.prototype.getPointAtLength = safeGetPointAtLength(SVGGeometryElement.prototype.getPointAtLength);
+                }}
+                if (window.SVGPathElement && SVGPathElement.prototype.getPointAtLength) {{
+                    SVGPathElement.prototype.getPointAtLength = safeGetPointAtLength(SVGPathElement.prototype.getPointAtLength);
+                }}
+            }})();
+
             const mermaidCode = {json_mermaid_code};
             let currentZoom = 1.0;
+            let renderAttempts = 0;
 
             function zoom(delta) {{
                 currentZoom = Math.max(0.4, Math.min(2.5, currentZoom + delta));
@@ -675,7 +702,7 @@ with tab_model:
                         }}
                     }});
 
-                    const uniqueId = 'svg_er_' + Math.floor(Math.random() * 1000000);
+                    const uniqueId = 'svg_er_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
                     const {{ svg }} = await mermaid.render(uniqueId, mermaidCode);
                     const target = document.getElementById('diagram-svg-target');
                     if (target) {{
@@ -683,22 +710,28 @@ with tab_model:
                     }}
                 }} catch (err) {{
                     console.error('Error renderizando diagrama:', err);
-                    const target = document.getElementById('diagram-svg-target');
-                    if (target) {{
-                        target.innerHTML = '<div style="color:#f85149; text-align:left; padding:20px;"><pre>' + err.message + '</pre></div>';
+                    if (renderAttempts < 3) {{
+                        renderAttempts++;
+                        setTimeout(renderDiagram, 200);
+                    }} else {{
+                        const target = document.getElementById('diagram-svg-target');
+                        if (target) {{
+                            target.innerHTML = '<div style="color:#f85149; text-align:left; padding:20px;"><pre>' + err.message + '</pre></div>';
+                        }}
                     }}
                 }}
             }}
 
             if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', renderDiagram);
+                document.addEventListener('DOMContentLoaded', () => setTimeout(renderDiagram, 50));
             }} else {{
-                renderDiagram();
+                setTimeout(renderDiagram, 50);
             }}
         </script>
     </head>
     <body>
         <div class="toolbar">
+            <button onclick="renderDiagram()">🔄 Recargar</button>
             <button onclick="zoom(0.15)">🔍 + Acercar</button>
             <button onclick="zoom(-0.15)">🔍 - Alejar</button>
             <button onclick="resetZoom()">⟲ Restablecer</button>
