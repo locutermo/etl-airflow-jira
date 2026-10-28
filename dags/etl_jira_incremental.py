@@ -67,19 +67,47 @@ def task_extract_and_stage(**context):
                 buffered_sync = datetime(2020, 1, 1, 0, 0, 0, tzinfo=LIMA_TZ)
         max_updated_at = buffered_sync
     else:
-        pipeline_name = "etl_jira_incremental_sync"
-        watermark_info = DWRepository.get_watermark(pipeline_name)
-        if watermark_info and watermark_info.get("last_successful_sync"):
-            last_sync = watermark_info["last_successful_sync"]
-            if last_sync.tzinfo is None:
-                last_sync = LIMA_TZ.localize(last_sync)
-            else:
-                last_sync = last_sync.astimezone(LIMA_TZ)
+        # Si se solicita un proyecto individual o lista sin fecha explícita,
+        # reanudar automáticamente desde la última fecha registrada en DW para ese proyecto
+        if project_keys_param and str(project_keys_param).strip() != 'ALL':
+            proj_list = [p.strip().upper() for p in str(project_keys_param).split(',') if p.strip()]
+            with get_dw_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT MAX(updated_at) 
+                        FROM fact_jira_issues_core 
+                        WHERE project_key = ANY(%s);
+                    """, (proj_list,))
+                    row = cur.fetchone()
+                    last_p_upd = row[0] if row else None
+                    if last_p_upd:
+                        if last_p_upd.tzinfo is None:
+                            last_p_upd = LIMA_TZ.localize(last_p_upd)
+                        else:
+                            last_p_upd = last_p_upd.astimezone(LIMA_TZ)
+                        buffered_sync = last_p_upd - timedelta(minutes=15)
+                        watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
+                        max_updated_at = last_p_upd
+                        logger.info(f"Proyectos específicos {proj_list}: reanudando automáticamente desde su última actualización registrada: {watermark_str}")
+                    else:
+                        buffered_sync = datetime(2019, 12, 31, 0, 0, 0, tzinfo=LIMA_TZ)
+                        watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
+                        max_updated_at = buffered_sync
+                        logger.info(f"Proyectos específicos {proj_list}: sin registros previos en DW. Iniciando desde {watermark_str}")
         else:
-            last_sync = datetime(2020, 1, 1, 0, 0, 0, tzinfo=LIMA_TZ)
-        buffered_sync = last_sync - timedelta(minutes=15)
-        watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
-        max_updated_at = last_sync
+            pipeline_name = "etl_jira_incremental_sync"
+            watermark_info = DWRepository.get_watermark(pipeline_name)
+            if watermark_info and watermark_info.get("last_successful_sync"):
+                last_sync = watermark_info["last_successful_sync"]
+                if last_sync.tzinfo is None:
+                    last_sync = LIMA_TZ.localize(last_sync)
+                else:
+                    last_sync = last_sync.astimezone(LIMA_TZ)
+            else:
+                last_sync = datetime(2019, 12, 31, 0, 0, 0, tzinfo=LIMA_TZ)
+            buffered_sync = last_sync - timedelta(minutes=15)
+            watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
+            max_updated_at = last_sync
 
     # 2. Construir filtro de proyectos (JQL)
     jql_parts = []

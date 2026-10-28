@@ -167,6 +167,13 @@ with tab_daily:
         if st.button("🔄 Refrescar Espacios"):
             st.rerun()
 
+    # Filtros de visualización
+    col_f1, col_f2 = st.columns([2, 2])
+    with col_f1:
+        filtro_estado = st.radio("Filtrar por estado:", ["Todos", "✅ Solo Activos", "⏸️ Solo Pausados"], horizontal=True)
+    with col_f2:
+        search_space = st.text_input("🔍 Buscar espacio (prefijo o nombre):", "").strip().lower()
+
     df_stats = run_query("""
         SELECT 
             project_key AS "Prefijo (Key)",
@@ -177,19 +184,125 @@ with tab_daily:
             total_deleted_issues AS "Eliminados",
             mapped_custom_fields_count AS "Campos Homologados",
             to_char(last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI') AS "Última Actividad Jira",
-            to_char(last_etl_sync_at, 'YYYY-MM-DD HH24:MI') AS "Último ETL DW"
+            to_char(last_etl_sync_at, 'YYYY-MM-DD HH24:MI') AS "Último ETL DW",
+            is_sync_enabled
         FROM meta_project_sync_stats
         ORDER BY total_active_issues DESC;
     """)
 
     if not df_stats.empty:
-        st.dataframe(df_stats, use_container_width=True, hide_index=True)
+        # Aplicar filtros
+        df_filtered = df_stats.copy()
+        if filtro_estado == "✅ Solo Activos":
+            df_filtered = df_filtered[df_filtered["is_sync_enabled"] == True]
+        elif filtro_estado == "⏸️ Solo Pausados":
+            df_filtered = df_filtered[df_filtered["is_sync_enabled"] == False]
+
+        if search_space:
+            df_filtered = df_filtered[
+                df_filtered["Prefijo (Key)"].str.lower().str.contains(search_space, na=False) |
+                df_filtered["Nombre del Espacio"].str.lower().str.contains(search_space, na=False)
+            ]
+
+        st.dataframe(df_filtered.drop(columns=["is_sync_enabled"]), use_container_width=True, hide_index=True)
     else:
         st.info("No se han sincronizado estadísticas aún. Ejecuta el DAG de sincronización inicial en Airflow.")
 
+    # 3. Panel de Gestión: Activar / Pausar Sincronización de Espacios
+    with st.expander("⚙️ Administrar Activación / Pausa de Espacios de Trabajo", expanded=False):
+        st.markdown("""
+        **Reglas del Motor:**
+        * Al **pausar** un espacio, el pipeline incremental general lo ignora por completo. **Sus datos históricos se mantienen intactos** para consultas y Power BI.
+        * Al **reactivar** un espacio, puedes reanudar la extracción inmediatamente **desde la última fecha registrada en el DW**, garantizando cero pérdida de datos.
+        """)
+
+        tab_m_ind, tab_m_bulk = st.tabs(["🎯 Gestión Individual", "📦 Gestión Masiva"])
+
+        with tab_m_ind:
+            df_all_p = run_query("""
+                SELECT 
+                    p.project_key, p.project_name, p.is_sync_enabled,
+                    s.total_active_issues,
+                    to_char(s.last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI') AS last_update
+                FROM dim_jira_project p
+                LEFT JOIN meta_project_sync_stats s ON p.project_id = s.project_id
+                ORDER BY p.project_key ASC;
+            """)
+
+            if not df_all_p.empty:
+                col_p1, col_p2 = st.columns([2, 2])
+                with col_p1:
+                    sel_p_key = st.selectbox(
+                        "Selecciona el Espacio a configurar:",
+                        df_all_p["project_key"].tolist(),
+                        format_func=lambda x: f"{x} - {df_all_p[df_all_p['project_key'] == x]['project_name'].values[0]}"
+                    )
+                    curr_row = df_all_p[df_all_p["project_key"] == sel_p_key].iloc[0]
+                    curr_enabled = bool(curr_row["is_sync_enabled"])
+                    curr_issues = curr_row["total_active_issues"] or 0
+                    curr_date = curr_row["last_update"] or "Sin fecha previa"
+
+                with col_p2:
+                    st.write("**Estado Actual:**")
+                    if curr_enabled:
+                        st.success(f"🟢 **ACTIVO** en pipeline incremental ({curr_issues:,} tickets en DW)")
+                    else:
+                        st.warning(f"⏸️ **PAUSADO** (Ignorado por ETL, {curr_issues:,} tickets históricos preservados)")
+                    st.caption(f"Última fecha registrada en DW: `{curr_date}`")
+
+                col_btn_a, col_btn_b = st.columns(2)
+                with col_btn_a:
+                    if curr_enabled:
+                        if st.button(f"⏸️ Pausar Espacio '{sel_p_key}'", use_container_width=True):
+                            run_execute("UPDATE dim_jira_project SET is_sync_enabled = FALSE WHERE project_key = %s;", (sel_p_key,))
+                            run_execute("UPDATE meta_project_sync_stats SET is_sync_enabled = FALSE WHERE project_key = %s;", (sel_p_key,))
+                            st.success(f"Espacio '{sel_p_key}' pausado. Ya no se extraerán tickets en los ciclos automáticos.")
+                            st.rerun()
+                    else:
+                        if st.button(f"✅ Habilitar Espacio '{sel_p_key}'", use_container_width=True):
+                            run_execute("UPDATE dim_jira_project SET is_sync_enabled = TRUE WHERE project_key = %s;", (sel_p_key,))
+                            run_execute("UPDATE meta_project_sync_stats SET is_sync_enabled = TRUE WHERE project_key = %s;", (sel_p_key,))
+                            st.success(f"Espacio '{sel_p_key}' activado para próximas sincronizaciones.")
+                            st.rerun()
+
+                with col_btn_b:
+                    if not curr_enabled or curr_date != "Sin fecha previa":
+                        if st.button(f"🚀 Sincronizar '{sel_p_key}' desde última fecha ({curr_date})", use_container_width=True):
+                            ok = trigger_airflow_dag(
+                                "etl_jira_incremental_sync",
+                                conf={"project_keys": sel_p_key, "max_records": 0}
+                            )
+                            if ok:
+                                st.success(f"Sincronización disparada en Airflow para '{sel_p_key}' desde `{curr_date}`.")
+                            else:
+                                st.error("Error al contactar Airflow API.")
+
+        with tab_m_bulk:
+            st.markdown("##### Pausar o Reactivar múltiples espacios a la vez")
+            df_bulk = run_query("SELECT project_key, project_name, is_sync_enabled FROM dim_jira_project ORDER BY project_key ASC;")
+            if not df_bulk.empty:
+                bulk_selected = st.multiselect(
+                    "Selecciona los espacios:",
+                    df_bulk["project_key"].tolist(),
+                    format_func=lambda x: f"{x} - {df_bulk[df_bulk['project_key'] == x]['project_name'].values[0]}"
+                )
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    if st.button("⏸️ Pausar Seleccionados", disabled=not bulk_selected):
+                        run_execute("UPDATE dim_jira_project SET is_sync_enabled = FALSE WHERE project_key = ANY(%s);", (bulk_selected,))
+                        run_execute("UPDATE meta_project_sync_stats SET is_sync_enabled = FALSE WHERE project_key = ANY(%s);", (bulk_selected,))
+                        st.success(f"{len(bulk_selected)} espacios han sido pausados.")
+                        st.rerun()
+                with col_b2:
+                    if st.button("✅ Reactivar Seleccionados", disabled=not bulk_selected):
+                        run_execute("UPDATE dim_jira_project SET is_sync_enabled = TRUE WHERE project_key = ANY(%s);", (bulk_selected,))
+                        run_execute("UPDATE meta_project_sync_stats SET is_sync_enabled = TRUE WHERE project_key = ANY(%s);", (bulk_selected,))
+                        st.success(f"{len(bulk_selected)} espacios han sido reactivados.")
+                        st.rerun()
+
     st.markdown("---")
 
-    # 3. Inspector Drill-Down de Campos por Espacio
+    # 4. Inspector Drill-Down de Campos por Espacio
     st.markdown("### 🔍 Inspector Detallado de Campos por Espacio")
     df_projects = run_query("SELECT project_key, project_name FROM dim_jira_project ORDER BY project_key ASC;")
 
@@ -197,14 +310,14 @@ with tab_daily:
         col_sel, col_act = st.columns([3, 1])
         with col_sel:
             selected_proj = st.selectbox(
-                "Selecciona un Espacio de Trabajo:",
+                "Selecciona un Espacio de Trabajo para auditar:",
                 df_projects["project_key"].tolist(),
                 format_func=lambda x: f"{x} - {df_projects[df_projects['project_key'] == x]['project_name'].values[0]}"
             )
         with col_act:
             st.write("") # espaciador
             if st.button(f"🚀 Extraer {selected_proj} Ahora"):
-                ok = trigger_airflow_dag("etl_jira_incremental_sync", conf={"project_keys": selected_proj, "max_records": 500})
+                ok = trigger_airflow_dag("etl_jira_incremental_sync", conf={"project_keys": selected_proj, "max_records": 0})
                 if ok:
                     st.success(f"Extracción iniciada en Airflow para '{selected_proj}'.")
                 else:
