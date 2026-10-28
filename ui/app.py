@@ -176,8 +176,8 @@ with tab_daily:
             total_active_issues AS "Tickets",
             total_deleted_issues AS "Eliminados",
             mapped_custom_fields_count AS "Campos Mapeados",
-            to_char(last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI') AS "Última Actividad Jira",
-            to_char(last_etl_sync_at, 'YYYY-MM-DD HH24:MI') AS "Última Sincronización",
+            COALESCE(to_char(last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI'), '-') AS "Última Actividad Jira",
+            COALESCE(to_char(last_etl_sync_at, 'YYYY-MM-DD HH24:MI'), 'Pendiente') AS "Última Sincronización",
             is_sync_enabled
         FROM meta_project_sync_stats
         ORDER BY total_active_issues DESC;
@@ -211,7 +211,7 @@ with tab_daily:
                 SELECT 
                     p.project_key, p.project_name, p.is_sync_enabled,
                     s.total_active_issues,
-                    to_char(s.last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI') AS last_update
+                    COALESCE(to_char(s.last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI'), '-') AS last_update
                 FROM dim_jira_project p
                 LEFT JOIN meta_project_sync_stats s ON p.project_id = s.project_id
                 ORDER BY p.project_key ASC;

@@ -371,40 +371,8 @@ class DWRepository:
 
     @staticmethod
     def refresh_project_sync_stats():
-        """Refresca la tabla meta_project_sync_stats agregando estadísticas por espacio."""
+        """Refresca la tabla meta_project_sync_stats llamando al stored procedure en PostgreSQL."""
         with dw_cursor() as cur:
-            cur.execute("""
-                INSERT INTO meta_project_sync_stats (
-                    project_id, project_key, project_name, project_type, is_sync_enabled,
-                    total_active_issues, total_deleted_issues, mapped_custom_fields_count,
-                    last_issue_updated_in_jira, last_etl_sync_at, last_sync_status
-                )
-                SELECT 
-                    p.project_id,
-                    p.project_key,
-                    p.project_name,
-                    p.project_type,
-                    p.is_sync_enabled,
-                    COALESCE(SUM(CASE WHEN c.is_deleted = FALSE THEN 1 ELSE 0 END), 0)::INT AS total_active,
-                    COALESCE(SUM(CASE WHEN c.is_deleted = TRUE THEN 1 ELSE 0 END), 0)::INT AS total_deleted,
-                    (SELECT COUNT(DISTINCT field_id) FROM meta_field_homologation h WHERE h.project_key = p.project_key OR h.project_key = 'ALL')::INT,
-                    MAX(c.updated_at),
-                    CURRENT_TIMESTAMP,
-                    'SUCCESS'
-                FROM dim_jira_project p
-                LEFT JOIN fact_jira_issues_core c ON p.project_id = c.project_id
-                GROUP BY p.project_id, p.project_key, p.project_name, p.project_type, p.is_sync_enabled
-                ON CONFLICT (project_id) DO UPDATE SET
-                    project_key = EXCLUDED.project_key,
-                    project_name = EXCLUDED.project_name,
-                    project_type = EXCLUDED.project_type,
-                    is_sync_enabled = EXCLUDED.is_sync_enabled,
-                    total_active_issues = EXCLUDED.total_active_issues,
-                    total_deleted_issues = EXCLUDED.total_deleted_issues,
-                    mapped_custom_fields_count = EXCLUDED.mapped_custom_fields_count,
-                    last_issue_updated_in_jira = EXCLUDED.last_issue_updated_in_jira,
-                    last_etl_sync_at = CURRENT_TIMESTAMP,
-                    last_sync_status = 'SUCCESS';
-            """)
-            logger.info("Estadísticas en meta_project_sync_stats refrescadas exitosamente.")
+            cur.execute("CALL sp_refresh_project_sync_stats();")
+            logger.info("Estadísticas en meta_project_sync_stats refrescadas exitosamente mediante sp_refresh_project_sync_stats.")
 
