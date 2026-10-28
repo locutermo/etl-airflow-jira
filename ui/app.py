@@ -11,6 +11,7 @@ import psycopg2
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="Jira Data Warehouse | Gobierno TI",
@@ -83,9 +84,10 @@ st.sidebar.markdown("""
 * [cAdvisor](http://localhost:8085)
 """)
 
-tab_daily, tab_dict, tab_maint = st.tabs([
+tab_daily, tab_dict, tab_model, tab_maint = st.tabs([
     "Panel General",
     "Homologación de Campos",
+    "Modelo de Datos (ER)",
     "Mantenimiento"
 ])
 
@@ -436,7 +438,271 @@ with tab_dict:
                 st.error(f"Error al procesar: {e}")
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 3: MANTENIMIENTO
+# PESTAÑA 3: MODELO DE DATOS (ER)
+# -----------------------------------------------------------------------------
+with tab_model:
+    st.subheader("Modelo de Datos y Arquitectura de Tablas")
+    st.caption("Estructura relacional del Data Warehouse analítico (PostgreSQL 16).")
+
+    # Métricas de volumen por tabla en vivo
+    df_counts = run_query("""
+        SELECT 
+            (SELECT count(*) FROM fact_jira_issues_core) AS "fact_jira_issues_core",
+            (SELECT count(*) FROM fact_jira_changelog) AS "fact_jira_changelog",
+            (SELECT count(*) FROM fact_jsm_requests) AS "fact_jsm_requests",
+            (SELECT count(*) FROM fact_issue_custom_values) AS "fact_issue_custom_values",
+            (SELECT count(*) FROM fact_issue_transitions) AS "fact_issue_transitions",
+            (SELECT count(*) FROM dim_jira_project) AS "dim_jira_project",
+            (SELECT count(*) FROM dim_jira_user) AS "dim_jira_user",
+            (SELECT count(*) FROM meta_jira_field_catalog) AS "meta_jira_field_catalog";
+    """)
+
+    if not df_counts.empty:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Tickets (Core)", f"{df_counts['fact_jira_issues_core'].iloc[0]:,}")
+        c2.metric("Historial de Cambios", f"{df_counts['fact_jira_changelog'].iloc[0]:,}")
+        c3.metric("Tickets JSM", f"{df_counts['fact_jsm_requests'].iloc[0]:,}")
+        c4.metric("Usuarios Dimensionados", f"{df_counts['dim_jira_user'].iloc[0]:,}")
+
+    st.markdown("#### Diagrama Entidad - Relación (ER)")
+
+    mermaid_diagram = """
+    erDiagram
+        dim_jira_project ||--o{ fact_jira_issues_core : tiene
+        dim_jira_project ||--|| meta_project_sync_stats : metricas
+        dim_jira_user ||--o{ fact_jira_issues_core : asignado
+        
+        fact_jira_issues_core ||--o| fact_jsm_requests : extension_jsm
+        fact_jira_issues_core ||--o{ fact_issue_custom_values : valores_eav
+        fact_jira_issues_core ||--o{ fact_jira_changelog : historial
+        fact_jira_issues_core ||--o{ fact_issue_transitions : transiciones
+
+        meta_jira_field_catalog ||--o{ meta_field_homologation : catalogo
+        meta_jira_field_catalog ||--o{ fact_issue_custom_values : tipo_campo
+        
+        stg_jira_issues_raw ||--o{ fact_jira_issues_core : transforma
+
+        dim_jira_project {
+            bigint project_id PK
+            varchar project_key UK
+            varchar project_name
+            varchar project_type
+            boolean is_sync_enabled
+        }
+
+        dim_jira_user {
+            varchar account_id PK
+            varchar display_name
+            varchar email_address
+            boolean is_active
+            varchar account_type
+        }
+
+        fact_jira_issues_core {
+            bigint issue_id PK
+            varchar issue_key UK
+            bigint project_id FK
+            varchar summary
+            varchar issue_type_name
+            varchar status_name
+            varchar status_category
+            varchar reporter_account_id FK
+            varchar assignee_account_id FK
+            timestamp created_at
+            timestamp updated_at
+            timestamp resolved_at
+            bigint lead_time_seconds
+            boolean is_deleted
+        }
+
+        fact_jsm_requests {
+            bigint issue_id PK "PK, FK"
+            varchar request_type_name
+            varchar organization_name
+            bigint sla_first_response_target_sec
+            bigint sla_resolution_target_sec
+            boolean sla_resolution_breached
+            int csat_rating
+        }
+
+        fact_issue_custom_values {
+            bigint issue_id PK "PK, FK"
+            varchar canonical_name PK
+            varchar field_id FK
+            text val_text
+            numeric val_number
+            timestamp val_timestamp
+            varchar val_account_id
+        }
+
+        fact_jira_changelog {
+            varchar changelog_item_key PK
+            bigint issue_id FK
+            varchar field_name
+            text from_string
+            text to_string
+            timestamp changed_at
+        }
+
+        fact_issue_transitions {
+            bigserial transition_id PK
+            bigint issue_id FK
+            varchar field_name
+            text field_value
+            timestamp start_at
+            timestamp end_at
+            bigint duration_seconds
+            boolean is_current_state
+        }
+
+        meta_jira_field_catalog {
+            varchar field_id PK
+            varchar field_name_jira
+            varchar schema_type
+            boolean is_custom
+        }
+
+        meta_field_homologation {
+            serial homologation_id PK
+            varchar project_key
+            varchar field_id FK
+            varchar canonical_name
+            varchar normalization_strategy
+            boolean expose_in_datamart
+        }
+
+        stg_jira_issues_raw {
+            bigint issue_id PK
+            varchar project_key
+            varchar issue_key
+            timestamp updated_at
+            jsonb raw_payload
+        }
+    """
+
+    mermaid_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{
+                margin: 0;
+                padding: 10px;
+                background-color: transparent;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                color: #e0e0e0;
+            }}
+            .toolbar {{
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                margin-bottom: 8px;
+            }}
+            .toolbar button {{
+                background: #21262d;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                padding: 4px 10px;
+                font-size: 12px;
+                cursor: pointer;
+            }}
+            .toolbar button:hover {{
+                background: #30363d;
+                color: #ffffff;
+            }}
+            .mermaid-wrapper {{
+                overflow: auto;
+                background: #0e1117;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 20px;
+                text-align: center;
+                max-height: 680px;
+            }}
+            .mermaid {{
+                display: inline-block;
+                transform-origin: top center;
+                transition: transform 0.15s ease-in-out;
+            }}
+        </style>
+        <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
+        <script>
+            let currentZoom = 1.0;
+            function zoom(delta) {{
+                currentZoom = Math.max(0.5, Math.min(2.0, currentZoom + delta));
+                const el = document.querySelector('.mermaid');
+                if (el) {{
+                    el.style.transform = `scale(${{currentZoom}})`;
+                }}
+            }}
+            function resetZoom() {{
+                currentZoom = 1.0;
+                const el = document.querySelector('.mermaid');
+                if (el) {{
+                    el.style.transform = 'scale(1)';
+                }}
+            }}
+            document.addEventListener('DOMContentLoaded', function() {{
+                try {{
+                    mermaid.initialize({{
+                        startOnLoad: true,
+                        theme: 'dark',
+                        themeVariables: {{
+                            darkMode: true,
+                            background: '#0e1117',
+                            primaryColor: '#1f6feb',
+                            primaryTextColor: '#f0f6fc',
+                            primaryBorderColor: '#388bfd',
+                            lineColor: '#58a6ff',
+                            secondaryColor: '#238636',
+                            tertiaryColor: '#161b22'
+                        }}
+                    }});
+                }} catch (e) {{
+                    console.error('Error inicializando Mermaid:', e);
+                }}
+            }});
+        </script>
+    </head>
+    <body>
+        <div class="toolbar">
+            <button onclick="zoom(0.15)">🔍 + Acercar</button>
+            <button onclick="zoom(-0.15)">🔍 - Alejar</button>
+            <button onclick="resetZoom()">⟲ Restablecer</button>
+        </div>
+        <div class="mermaid-wrapper">
+            <div class="mermaid">
+{mermaid_diagram}
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    components.html(mermaid_html, height=750, scrolling=True)
+
+    st.markdown("---")
+    st.markdown("#### Detalle de Capas y Tablas")
+
+    tab_desc = [
+        {"Capa": "Staging (Raw)", "Tabla": "stg_jira_issues_raw", "Tipo": "Lake JSONB", "Descripción": "Payloads íntegros crudos devueltos por la API v3. Permite Backfill Zero-API sin tocar Jira."},
+        {"Capa": "Dimensional", "Tabla": "dim_jira_project", "Tipo": "Dimensión", "Descripción": "Espacios de trabajo, tipo (software, service desk, business) y estado de sincronización."},
+        {"Capa": "Dimensional", "Tabla": "dim_jira_user", "Tipo": "Dimensión", "Descripción": "Usuarios unificados de Jira (asignados, reporteros, creadores, aprobadores)."},
+        {"Capa": "Hechos", "Tabla": "fact_jira_issues_core", "Tipo": "Fact Principal", "Descripción": "Atributos universales de cada issue: estados, prioridades, fechas, tipo, lead time y borrado lógico."},
+        {"Capa": "Hechos", "Tabla": "fact_jsm_requests", "Tipo": "Extensión 1:1", "Descripción": "Atributos exclusivos de Service Desk: Request Types, organizaciones, métricas de SLA y CSAT."},
+        {"Capa": "Hechos", "Tabla": "fact_issue_custom_values", "Tipo": "EAV Tipado", "Descripción": "Almacenamiento columnar tipado (texto, número, fecha) para campos personalizados homologados."},
+        {"Capa": "Hechos", "Tabla": "fact_jira_changelog", "Tipo": "Fact Eventos", "Descripción": "Historial de modificaciones por campo (status, assignee, priority, customfields)."},
+        {"Capa": "Hechos", "Tabla": "fact_issue_transitions", "Tipo": "Fact Intervalos", "Descripción": "Tiempos de permanencia en segundos por estado o responsable, listos para Power BI."},
+        {"Capa": "Metadatos", "Tabla": "meta_jira_field_catalog", "Tipo": "Catálogo", "Descripción": "Inventario de todos los custom fields existentes en la instancia de Atlassian Jira."},
+        {"Capa": "Metadatos", "Tabla": "meta_field_homologation", "Tipo": "Configuración", "Descripción": "Reglas de mapeo a nombres canónicos y visibilidad en vistas mart para BI."},
+        {"Capa": "Metadatos", "Tabla": "meta_etl_watermarks", "Tipo": "Control ETL", "Descripción": "Punto de control (watermark) del pipeline incremental con timestamps precisos GMT-5."},
+        {"Capa": "Metadatos", "Tabla": "meta_project_sync_stats", "Tipo": "Estadísticas", "Descripción": "Conteo precalculado de tickets y estado por espacio para carga instantánea en UI."}
+    ]
+    st.dataframe(pd.DataFrame(tab_desc), use_container_width=True, hide_index=True)
+
+# -----------------------------------------------------------------------------
+# PESTAÑA 4: MANTENIMIENTO
 # -----------------------------------------------------------------------------
 with tab_maint:
     st.subheader("Mantenimiento")
