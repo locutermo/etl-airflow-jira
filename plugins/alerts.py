@@ -42,7 +42,7 @@ def notify_webhook_failure(context):
         "summary": f"Fallo en Pipeline ETL Jira: {dag_id}.{task_id}",
         "sections": [
             {
-                "activityTitle": "🚨 **ALERTA CRÍTICA: Fallo en Pipeline de Datos Jira (Gobierno TI)**",
+                "activityTitle": "**ALERTA CRÍTICA: Fallo en Pipeline de Datos Jira (Gobierno TI)**",
                 "activitySubtitle": f"Ejecución: {now_lima}",
                 "facts": [
                     {"name": "DAG:", "value": str(dag_id)},
@@ -59,7 +59,7 @@ def notify_webhook_failure(context):
         payload["potentialAction"] = [
             {
                 "@type": "OpenUri",
-                "name": "🔍 Ver Logs en Airflow",
+                "name": "Ver Logs en Airflow",
                 "targets": [{"os": "default", "uri": log_url}]
             }
         ]

@@ -15,7 +15,6 @@ import streamlit.components.v1 as components
 
 st.set_page_config(
     page_title="Jira Data Warehouse | Gobierno TI",
-    page_icon="📁",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -169,7 +168,7 @@ with tab_daily:
     # -------------------------------------------------------------------------
     # MONITOR DE HILOS DE EXTRACCIÓN CONCURRENTE (TIEMPO REAL)
     # -------------------------------------------------------------------------
-    with st.expander("⚡ Monitor de Hilos de Extracción en Tiempo Real", expanded=True):
+    with st.expander("Monitor de Hilos de Extracción en Tiempo Real", expanded=True):
         df_threads = run_query("""
             SELECT 
                 worker_id, thread_name, current_project, status,
@@ -183,7 +182,7 @@ with tab_daily:
         with col_m_head1:
             st.caption("Estado en vivo de los hilos de Jira Cloud (Productores) y el escritor hacia PostgreSQL (Consumidor).")
         with col_m_head2:
-            if st.button("🔄 Refrescar Hilos", key="btn_refresh_threads"):
+            if st.button("Actualizar Hilos", key="btn_refresh_threads"):
                 st.rerun()
 
         if not df_threads.empty:
@@ -201,15 +200,15 @@ with tab_daily:
                     is_active = sec_ago < 60 and w_status in ("EXTRACTING", "WRITING_TO_DW")
                     
                     if w_id == "DB-Consumer":
-                        status_badge = "🟢 ACTIVO" if is_active else "⚪ EN ESPERA"
-                        st.markdown(f"**💾 {w_id}** `{status_badge}`")
+                        status_badge = "[ACTIVO]" if is_active else "[EN ESPERA]"
+                        st.markdown(f"**{w_id}** `{status_badge}`")
                         st.write(f"Estado: **{w_status}**")
                         st.write(f"Cola Buffer: **{q_depth} / 6 lotes**")
                         st.progress(min(1.0, max(0.0, q_depth / 6.0)))
                         st.caption(f"Persistidos: **{w_issues:,}** tickets (hace {sec_ago}s)")
                     else:
-                        status_badge = "🟢 EXTRAYENDO" if is_active else "⚪ INACTIVO"
-                        st.markdown(f"**⚡ {w_id}** `{status_badge}`")
+                        status_badge = "[EXTRAYENDO]" if is_active else "[INACTIVO]"
+                        st.markdown(f"**{w_id}** `{status_badge}`")
                         st.write(f"Proyecto: **{w_proj}**")
                         st.write(f"Extraídos: **{w_issues:,}**")
                         st.caption(f"Último: `{w_key}` (hace {sec_ago}s)")
@@ -366,7 +365,7 @@ with tab_daily:
             )
         with col_act1:
             st.write("")
-            if st.button(f"⚡ Auto-Mapear Pantallas", key=f"btn_auto_{selected_proj}", help=f"Genera reglas base únicamente para los campos de pantalla de {selected_proj} (excluyendo mensajes)"):
+            if st.button(f"Auto-Mapear Pantallas", key=f"btn_auto_{selected_proj}", help=f"Genera reglas base únicamente para los campos de pantalla de {selected_proj} (excluyendo mensajes)"):
                 with st.spinner(f"Detectando campos de pantalla para {selected_proj}..."):
                     try:
                         run_execute("CALL sp_auto_generate_base_homologation(%s);", (selected_proj,))
@@ -427,7 +426,7 @@ with tab_daily:
 
                 col_m_act1, col_m_act2 = st.columns(2)
                 with col_m_act1:
-                    if st.button(f"⚡ Regularizar Histórico ({len(df_mapped)})", key=f"btn_reg_hist_{selected_proj}", help="Procesa registros históricos almacenados en Staging para los campos mapeados"):
+                    if st.button(f"Regularizar Histórico ({len(df_mapped)})", key=f"btn_reg_hist_{selected_proj}", help="Procesa registros históricos almacenados en Staging para los campos mapeados"):
                         with st.spinner(f"Regularizando histórico de {selected_proj}..."):
                             try:
                                 run_execute("CALL sp_regularize_project_custom_fields(%s);", (selected_proj,))
@@ -436,7 +435,7 @@ with tab_daily:
                             except Exception as e:
                                 st.error(f"Error: {e}")
                 with col_m_act2:
-                    if st.button(f"🗑️ Limpiar Mapeo", key=f"btn_clean_{selected_proj}", help=f"Elimina las reglas de homologación y valores EAV de {selected_proj}"):
+                    if st.button(f"Limpiar Mapeo", key=f"btn_clean_{selected_proj}", help=f"Elimina las reglas de homologación y valores EAV de {selected_proj}"):
                         run_execute("DELETE FROM meta_field_homologation WHERE project_key = %s;", (selected_proj,))
                         run_execute("DELETE FROM fact_issue_custom_values WHERE project_key = %s;", (selected_proj,))
                         run_execute("CALL sp_rebuild_project_datamart_view(%s);", (selected_proj,))
@@ -511,7 +510,7 @@ with tab_daily:
                     help="Selecciona únicamente los campos de negocio que necesitas analizar."
                 )
 
-                if st.button("➕ Incorporar Campos Seleccionados", key=f"btn_add_fields_{selected_proj}", disabled=not selected_fields):
+                if st.button("Incorporar Campos Seleccionados", key=f"btn_add_fields_{selected_proj}", disabled=not selected_fields):
                     for label in selected_fields:
                         fid, fname, stype = options_map[label]
                         run_execute("""
@@ -546,7 +545,7 @@ with tab_dict:
     st.subheader("Mapeo de Campos Personalizados")
     st.caption("Asocia campos de Jira al modelo analítico y procesa su histórico directamente desde los registros almacenados.")
 
-    with st.expander("⚡ Generación y Regularización Base Masiva", expanded=False):
+    with st.expander("Generación y Regularización Base Masiva", expanded=False):
         st.caption("Crea automáticamente las reglas base para los campos detectados en pantalla y regulariza los datos históricos almacenados.")
         col_reg1, col_reg2 = st.columns([2, 2])
         with col_reg1:
@@ -970,10 +969,10 @@ with tab_model:
     </head>
     <body>
         <div class="toolbar">
-            <button onclick="renderDiagram()">🔄 Recargar</button>
-            <button onclick="zoom(0.15)">🔍 + Acercar</button>
-            <button onclick="zoom(-0.15)">🔍 - Alejar</button>
-            <button onclick="resetZoom()">⟲ Restablecer</button>
+            <button onclick="renderDiagram()">Recargar</button>
+            <button onclick="zoom(0.15)">Acercar (+)</button>
+            <button onclick="zoom(-0.15)">Alejar (-)</button>
+            <button onclick="resetZoom()">Restablecer</button>
         </div>
         <div class="mermaid-wrapper">
             <div id="diagram-svg-target">

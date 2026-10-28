@@ -97,7 +97,7 @@ def run_tests():
         logger.error(f"Fallo en refresh_project_sync_stats: {e}")
         return False
 
-    logger.info("🎉 ¡TODAS LAS PRUEBAS UNITARIAS Y DE INTEGRACIÓN PASARON AL 100%! 🎉")
+    logger.info("TODAS LAS PRUEBAS UNITARIAS Y DE INTEGRACIÓN PASARON SATISFACTORIAMENTE.")
     return True
 
 if __name__ == "__main__":
