@@ -435,7 +435,7 @@ with tab_daily:
                 SELECT 
                     h.field_id AS "ID Campo",
                     c.field_name_jira AS "Nombre Jira",
-                    'cf_' || h.canonical_name AS "Columna BD",
+                    CASE WHEN h.canonical_name LIKE 'cf_%' THEN h.canonical_name ELSE 'cf_' || h.canonical_name END AS "Columna BD",
                     h.normalization_strategy AS "Tipo",
                     COALESCE(SUM(eav.con_valor), 0)::BIGINT AS "Con Valor"
                 FROM meta_field_homologation h
@@ -645,7 +645,7 @@ with tab_dict:
                 h.project_key AS "Proyecto",
                 h.field_id AS "ID Campo",
                 COALESCE(c.field_name_jira, h.field_id) AS "Nombre Jira",
-                'cf_' || h.canonical_name AS "Columna DW",
+                CASE WHEN h.canonical_name LIKE 'cf_%' THEN h.canonical_name ELSE 'cf_' || h.canonical_name END AS "Columna DW",
                 h.normalization_strategy AS "Estrategia",
                 CASE WHEN h.expose_in_datamart THEN 'SI' ELSE 'NO' END AS "En Datamart",
                 h.updated_by AS "Creado Por",
@@ -737,6 +737,8 @@ with tab_dict:
             if not f_canonical:
                 st.warning("Indica un nombre de columna válido.")
             else:
+                if not f_canonical.startswith("cf_"):
+                    f_canonical = f"cf_{f_canonical}"
                 try:
                     run_execute("""
                         INSERT INTO meta_field_homologation (

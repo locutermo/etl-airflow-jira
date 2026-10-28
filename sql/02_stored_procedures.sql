@@ -298,13 +298,15 @@ BEGIN
     ) LOOP
         v_cols_sql := v_cols_sql || format(
             ', MAX(CASE WHEN eav.canonical_name = %L THEN eav.val_text END) AS %I',
-            rec.col_name, 'cf_' || rec.col_name
+            rec.col_name,
+            CASE WHEN rec.col_name LIKE 'cf_%' THEN rec.col_name ELSE 'cf_' || rec.col_name END
         );
     END LOOP;
 
-    -- Crear o reemplazar la vista optimizada para Power BI
+    -- Recrear la vista optimizada para Power BI
+    EXECUTE format('DROP VIEW IF EXISTS %I CASCADE;', v_view_name);
     EXECUTE format('
-        CREATE OR REPLACE VIEW %I AS
+        CREATE VIEW %I AS
         SELECT 
             c.issue_id,
             c.issue_key,
