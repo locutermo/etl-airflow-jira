@@ -105,6 +105,22 @@ def task_extract_and_stage(**context):
                     last_sync = last_sync.astimezone(LIMA_TZ)
             else:
                 last_sync = datetime(2019, 12, 31, 0, 0, 0, tzinfo=LIMA_TZ)
+
+            # Verificar si ya existen registros más avanzados en Core para no reprocesar desde cero
+            with get_dw_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT MAX(updated_at) FROM fact_jira_issues_core;")
+                    row_max = cur.fetchone()
+                    if row_max and row_max[0]:
+                        max_in_dw = row_max[0]
+                        if max_in_dw.tzinfo is None:
+                            max_in_dw = LIMA_TZ.localize(max_in_dw)
+                        else:
+                            max_in_dw = max_in_dw.astimezone(LIMA_TZ)
+                        if max_in_dw > last_sync:
+                            logger.info(f"Avanzando punto de sincronización al último registro en DW: {max_in_dw} (era {last_sync})")
+                            last_sync = max_in_dw
+
             buffered_sync = last_sync - timedelta(minutes=15)
             watermark_str = buffered_sync.strftime("%Y-%m-%d %H:%M")
             max_updated_at = last_sync
