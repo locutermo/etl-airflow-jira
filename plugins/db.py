@@ -121,6 +121,125 @@ class DWRepository:
                 """, (p_id, p_key, p_name, p_type, p_cat, lead_id))
 
     @staticmethod
+    def get_active_projects() -> List[Dict[str, Any]]:
+        """Retorna la lista de proyectos habilitados para sincronización en dim_jira_project."""
+        with dw_cursor() as cur:
+            cur.execute("""
+                SELECT project_id, project_key, project_name 
+                FROM dim_jira_project 
+                WHERE is_sync_enabled = TRUE 
+                ORDER BY project_key ASC;
+            """)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    @staticmethod
+    def sync_project_fields_differential(project_id: int, project_key: str, jira_fields: Dict[str, Dict[str, Any]]):
+        """
+        Sincroniza diferencialmente la asociación Proyecto-Campos en meta_project_field_association.
+        - Nuevos campos en Jira -> INSERT con is_active = TRUE
+        - Reactivados (estaban is_active = FALSE) -> UPDATE is_active = TRUE
+        - Removidos de Jira -> UPDATE is_active = FALSE
+        - Actualiza last_verified_at = CURRENT_TIMESTAMP
+        """
+        if not jira_fields:
+            return
+
+        with dw_cursor() as cur:
+            # 1. Asegurar que los campos existan en meta_jira_field_catalog para evitar violaciones de FK
+            catalog_tuples = [
+                (fid, fmeta["name"], "custom" if fmeta["is_custom"] else "standard", None, fmeta["is_custom"])
+                for fid, fmeta in jira_fields.items()
+            ]
+            execute_values(cur, """
+                INSERT INTO meta_jira_field_catalog (field_id, field_name_jira, schema_type, schema_custom, is_custom)
+                VALUES %s
+                ON CONFLICT (field_id) DO UPDATE SET
+                    field_name_jira = EXCLUDED.field_name_jira;
+            """, catalog_tuples)
+
+            # 2. Leer campos actuales en BD para este proyecto
+            cur.execute("""
+                SELECT field_id, is_active 
+                FROM meta_project_field_association 
+                WHERE project_id = %s;
+            """, (project_id,))
+            db_fields = dict(cur.fetchall())
+
+            # 3. Determinar altas, reactivaciones y bajas
+            jira_field_ids = set(jira_fields.keys())
+            db_field_ids = set(db_fields.keys())
+
+            to_insert = []
+            to_reactivate = []
+            to_deactivate = list(db_field_ids - jira_field_ids)
+
+            for fid, fmeta in jira_fields.items():
+                if fid not in db_fields:
+                    to_insert.append((
+                        project_id, project_key, fid, fmeta["name"], fmeta["is_custom"], True
+                    ))
+                elif not db_fields[fid]:
+                    to_reactivate.append(fid)
+
+            # 4. Aplicar cambios
+            if to_insert:
+                execute_values(cur, """
+                    INSERT INTO meta_project_field_association (
+                        project_id, project_key, field_id, field_name_jira, is_custom, is_active
+                    )
+                    VALUES %s
+                    ON CONFLICT (project_id, field_id) DO UPDATE SET
+                        field_name_jira = EXCLUDED.field_name_jira,
+                        is_custom = EXCLUDED.is_custom,
+                        is_active = TRUE,
+                        last_verified_at = CURRENT_TIMESTAMP;
+                """, to_insert)
+
+            if to_reactivate:
+                cur.execute("""
+                    UPDATE meta_project_field_association
+                    SET is_active = TRUE, last_verified_at = CURRENT_TIMESTAMP
+                    WHERE project_id = %s AND field_id = ANY(%s);
+                """, (project_id, to_reactivate))
+
+            if to_deactivate:
+                cur.execute("""
+                    UPDATE meta_project_field_association
+                    SET is_active = FALSE, last_verified_at = CURRENT_TIMESTAMP
+                    WHERE project_id = %s AND field_id = ANY(%s);
+                """, (project_id, to_deactivate))
+
+            # Actualizar last_verified_at para los que se mantuvieron activos
+            cur.execute("""
+                UPDATE meta_project_field_association
+                SET last_verified_at = CURRENT_TIMESTAMP
+                WHERE project_id = %s AND is_active = TRUE;
+            """, (project_id,))
+
+        logger.info(
+            f"Proyecto {project_key}: Sincronización diferencial de campos completada. "
+            f"Nuevos: {len(to_insert)}, Reactivados: {len(to_reactivate)}, Desactivados: {len(to_deactivate)}."
+        )
+
+    @staticmethod
+    def get_fields_for_project_extraction(project_key: str, universal_fields: List[str]) -> List[str]:
+        """
+        Retorna la unión deduplicada de universal_fields + los custom fields activos
+        asociados a las pantallas del proyecto en meta_project_field_association.
+        """
+        with dw_cursor() as cur:
+            cur.execute("""
+                SELECT field_id 
+                FROM meta_project_field_association 
+                WHERE project_key = %s AND is_active = TRUE;
+            """, (project_key,))
+            custom_ids = [row[0] for row in cur.fetchall()]
+
+        combined = list(dict.fromkeys(universal_fields + custom_ids))
+        return combined
+
+    @staticmethod
     def upsert_fields(fields: List[Dict[str, Any]]):
         if not fields:
             return

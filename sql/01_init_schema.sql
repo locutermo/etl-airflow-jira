@@ -59,6 +59,23 @@ CREATE TABLE IF NOT EXISTS meta_jira_field_catalog (
     discovered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Catálogo de Asociación: Campos configurados por cada Espacio de Trabajo
+CREATE TABLE IF NOT EXISTS meta_project_field_association (
+    project_id BIGINT NOT NULL REFERENCES dim_jira_project(project_id) ON DELETE CASCADE,
+    project_key VARCHAR(30) NOT NULL,
+    field_id VARCHAR(80) NOT NULL REFERENCES meta_jira_field_catalog(field_id),
+    field_name_jira VARCHAR(255) NOT NULL,
+    is_custom BOOLEAN DEFAULT TRUE,
+    is_active BOOLEAN DEFAULT TRUE,             -- FALSE si fue removido en Jira
+    discovered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_verified_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (project_id, field_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_proj_field_active 
+ON meta_project_field_association(project_key, field_id) 
+WHERE is_active = TRUE;
+
 -- Diccionario de Homologación Semántica y Mapeo por Proyecto / Request Type (Gestionado en UI)
 CREATE TABLE IF NOT EXISTS meta_field_homologation (
     homologation_id SERIAL PRIMARY KEY,

@@ -413,3 +413,175 @@ BEFORE INSERT OR UPDATE ON meta_project_sync_stats
 FOR EACH ROW
 EXECUTE FUNCTION trg_fix_project_sync_stats();
 
+-- -----------------------------------------------------------------------------
+-- 7. AUTO-DESCUBRIMIENTO Y REGULARIZACIÓN MASIVA DE CAMPOS PERSONALIZADOS
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION fn_clean_canonical_name(p_name TEXT)
+RETURNS VARCHAR(63) AS $$
+DECLARE
+    clean_str TEXT;
+BEGIN
+    clean_str := LOWER(TRIM(p_name));
+    clean_str := TRANSLATE(clean_str, 'áéíóúÁÉÍÓÚñÑüÜ', 'aeiouaeiounnuu');
+    clean_str := REGEXP_REPLACE(clean_str, '[^a-z0-9]+', '_', 'g');
+    clean_str := TRIM(BOTH '_' FROM clean_str);
+    IF LENGTH(clean_str) > 55 THEN
+        clean_str := SUBSTRING(clean_str, 1, 55);
+    END IF;
+    RETURN 'cf_' || clean_str;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION fn_infer_normalization_strategy(p_schema_type TEXT)
+RETURNS VARCHAR(50) AS $$
+BEGIN
+    RETURN CASE 
+        WHEN p_schema_type IN ('number', 'float') THEN 'NUMBER'
+        WHEN p_schema_type IN ('date', 'datetime') THEN 'DATE'
+        WHEN p_schema_type IN ('user') THEN 'USER_DIM'
+        WHEN p_schema_type IN ('option-with-child') THEN 'CASCADE_SPLIT'
+        ELSE 'STRING'
+    END;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE PROCEDURE sp_auto_generate_base_homologation(p_project_key VARCHAR(30))
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_inserted INT := 0;
+BEGIN
+    INSERT INTO meta_field_homologation (
+        project_key, request_type_name, field_id, canonical_name,
+        normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
+    )
+    SELECT 
+        p_project_key,
+        'ALL',
+        k.field_id,
+        fn_clean_canonical_name(COALESCE(c.field_name_jira, k.field_id)),
+        fn_infer_normalization_strategy(c.schema_type),
+        TRUE,
+        FALSE,
+        'auto_discovery'
+    FROM (
+        SELECT DISTINCT k.key AS field_id
+        FROM (
+            SELECT raw_payload->'fields' AS fields 
+            FROM stg_jira_issues_raw 
+            WHERE project_key = p_project_key 
+            LIMIT 2000
+        ) s,
+        LATERAL jsonb_each(s.fields) k
+        WHERE k.key LIKE 'customfield_%'
+          AND jsonb_typeof(k.value) != 'null'
+
+        UNION
+
+        SELECT field_id
+        FROM meta_project_field_association
+        WHERE project_key = p_project_key AND is_active = TRUE AND is_custom = TRUE
+    ) k
+    JOIN meta_jira_field_catalog c ON k.field_id = c.field_id
+    ON CONFLICT (project_key, request_type_name, field_id) DO NOTHING;
+
+    GET DIAGNOSTICS v_inserted = ROW_COUNT;
+    RAISE NOTICE 'Reglas base generadas para %: % nuevas reglas.', p_project_key, v_inserted;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE sp_regularize_project_custom_fields(p_project_key VARCHAR(30))
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- 1. Asegurar reglas base para este proyecto (pantallas + raw)
+    CALL sp_auto_generate_base_homologation(p_project_key);
+
+    -- 2. Regularización Vectorizada en UNA SOLA PASADA sobre stg_jira_issues_raw
+    INSERT INTO fact_issue_custom_values (
+        issue_id, project_key, field_id, canonical_name, val_text, val_number, val_timestamp, val_account_id
+    )
+    SELECT DISTINCT ON (sub.issue_id, sub.target_canonical_name)
+        sub.issue_id,
+        sub.project_key,
+        sub.field_id,
+        sub.target_canonical_name,
+        sub.val_text,
+        sub.val_number,
+        sub.val_timestamp,
+        sub.val_account_id
+    FROM (
+        SELECT 
+            s.issue_id,
+            s.project_key,
+            h.field_id,
+            CASE 
+                WHEN h.normalization_strategy = 'CASCADE_SPLIT' THEN h.canonical_name || '_parent'
+                ELSE h.canonical_name 
+            END AS target_canonical_name,
+            CASE 
+                WHEN h.normalization_strategy = 'CASCADE_SPLIT' THEN COALESCE(f.value->>'value', f.value->>'name')
+                WHEN h.normalization_strategy = 'NUMBER' THEN f.value #>> '{}'
+                WHEN h.normalization_strategy = 'DATE' THEN f.value #>> '{}'
+                WHEN h.normalization_strategy = 'USER_DIM' THEN COALESCE(f.value->>'displayName', f.value->>'name', f.value->>'value')
+                WHEN jsonb_typeof(f.value) = 'object' THEN COALESCE(f.value->>'value', f.value->>'name')
+                WHEN jsonb_typeof(f.value) = 'array' THEN (
+                    SELECT string_agg(COALESCE(elem->>'value', elem->>'name', elem::text), ', ')
+                    FROM jsonb_array_elements(f.value) elem
+                )
+                ELSE f.value #>> '{}'
+            END AS val_text,
+            CASE 
+                WHEN h.normalization_strategy = 'NUMBER' AND (f.value #>> '{}') ~ '^-?[0-9]+(\.[0-9]+)?$' 
+                THEN (f.value #>> '{}')::NUMERIC 
+                ELSE NULL 
+            END AS val_number,
+            CASE 
+                WHEN h.normalization_strategy = 'DATE' AND (f.value #>> '{}') IS NOT NULL 
+                THEN (f.value #>> '{}')::TIMESTAMP WITH TIME ZONE 
+                ELSE NULL 
+            END AS val_timestamp,
+            CASE 
+                WHEN h.normalization_strategy = 'USER_DIM' THEN f.value->>'accountId'
+                ELSE NULL
+            END AS val_account_id,
+            (h.project_key = s.project_key) AS is_exact_project,
+            h.homologation_id
+        FROM stg_jira_issues_raw s
+        CROSS JOIN LATERAL jsonb_each(s.raw_payload->'fields') f(key, value)
+        JOIN meta_field_homologation h 
+          ON (h.project_key = s.project_key OR h.project_key = 'ALL')
+         AND h.field_id = f.key
+        WHERE s.project_key = p_project_key
+          AND jsonb_typeof(f.value) != 'null'
+    ) sub
+    ORDER BY sub.issue_id, sub.target_canonical_name, sub.is_exact_project DESC, sub.homologation_id DESC
+    ON CONFLICT (issue_id, canonical_name) DO UPDATE SET
+        val_text = EXCLUDED.val_text,
+        val_number = EXCLUDED.val_number,
+        val_timestamp = EXCLUDED.val_timestamp,
+        val_account_id = EXCLUDED.val_account_id;
+
+    -- 3. Manejo de CASCADE_SPLIT (Hijo)
+    INSERT INTO fact_issue_custom_values (issue_id, project_key, field_id, canonical_name, val_text)
+    SELECT 
+        s.issue_id,
+        s.project_key,
+        h.field_id,
+        h.canonical_name || '_child',
+        s.raw_payload->'fields'->h.field_id->'child'->>'value'
+    FROM stg_jira_issues_raw s
+    JOIN meta_field_homologation h ON (h.project_key = s.project_key OR h.project_key = 'ALL')
+    WHERE s.project_key = p_project_key
+      AND h.normalization_strategy = 'CASCADE_SPLIT'
+      AND s.raw_payload->'fields'->h.field_id->'child'->>'value' IS NOT NULL
+    ON CONFLICT (issue_id, canonical_name) DO UPDATE SET val_text = EXCLUDED.val_text;
+
+    -- 4. Reconstruir vista y estadísticas
+    CALL sp_rebuild_project_datamart_view(p_project_key);
+    CALL sp_refresh_project_sync_stats();
+
+    RAISE NOTICE 'Regularización vectorizada completada exitosamente para proyecto %.', p_project_key;
+END;
+$$;
+

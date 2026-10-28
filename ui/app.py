@@ -291,16 +291,26 @@ with tab_daily:
     df_projects = run_query("SELECT project_key, project_name FROM dim_jira_project ORDER BY project_key ASC;")
 
     if not df_projects.empty:
-        col_sel, col_act = st.columns([3, 1])
+        col_sel, col_act1, col_act2 = st.columns([2.5, 1.3, 1.2])
         with col_sel:
             selected_proj = st.selectbox(
                 "Proyecto a inspeccionar:",
                 df_projects["project_key"].tolist(),
                 format_func=lambda x: f"{x} - {df_projects[df_projects['project_key'] == x]['project_name'].values[0]}"
             )
-        with col_act:
+        with col_act1:
             st.write("")
-            if st.button(f"Sincronizar {selected_proj}"):
+            if st.button(f"⚡ Auto-Mapear y Regularizar", key=f"btn_auto_{selected_proj}", help=f"Descubre campos de Jira y procesa el histórico de {selected_proj}"):
+                with st.spinner(f"Detectando campos y regularizando datos históricos para {selected_proj}..."):
+                    try:
+                        run_execute("CALL sp_regularize_project_custom_fields(%s);", (selected_proj,))
+                        st.success(f"Campos regularizados para {selected_proj}.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error regularizando {selected_proj}: {e}")
+        with col_act2:
+            st.write("")
+            if st.button(f"Sincronizar Jira", key=f"btn_sync_{selected_proj}", help=f"Dispara extracción incremental desde Jira Cloud para {selected_proj}"):
                 ok = trigger_airflow_dag("etl_jira_incremental_sync", conf={"project_keys": selected_proj, "max_records": 0})
                 if ok:
                     st.success(f"Sincronización enviada para {selected_proj}.")
@@ -341,7 +351,7 @@ with tab_daily:
                     df_mapped["Cobertura"] = "0.0 %"
                 st.dataframe(df_mapped, use_container_width=True, hide_index=True)
             else:
-                st.caption(f"No hay campos personalizados mapeados para `{selected_proj}`.")
+                st.caption(f"No hay campos personalizados mapeados para `{selected_proj}`. Usa el botón superior para generarlos automáticamente.")
 
         with col_right:
             st.markdown(f"**Campos detectados sin mapeo**")
@@ -377,6 +387,33 @@ with tab_daily:
 with tab_dict:
     st.subheader("Mapeo de Campos Personalizados")
     st.caption("Asocia campos de Jira al modelo analítico y procesa su histórico directamente desde los registros almacenados.")
+
+    with st.expander("⚡ Generación y Regularización Base Masiva", expanded=False):
+        st.caption("Crea automáticamente las reglas base para los campos detectados en pantalla y regulariza los datos históricos almacenados.")
+        col_reg1, col_reg2 = st.columns([2, 2])
+        with col_reg1:
+            sel_proj_reg = st.selectbox("Espacio a regularizar:", df_projects["project_key"].tolist() if not df_projects.empty else [], key="sel_reg_proj")
+            if st.button(f"Regularizar campos de {sel_proj_reg}", key="btn_reg_single"):
+                with st.spinner(f"Procesando histórico de {sel_proj_reg}..."):
+                    try:
+                        run_execute("CALL sp_regularize_project_custom_fields(%s);", (sel_proj_reg,))
+                        st.success(f"Proyecto {sel_proj_reg} regularizado con éxito.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        with col_reg2:
+            st.markdown("**Regularizar Todos los Proyectos Activos**")
+            st.caption("Recorre todos los espacios activos de forma secuencial sin llamadas a Jira.")
+            if st.button("Regularizar todos los activos", key="btn_reg_all"):
+                with st.spinner("Procesando todos los proyectos activos secuencialmente..."):
+                    try:
+                        df_act = run_query("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = TRUE ORDER BY project_key ASC;")
+                        for p_key in df_act["project_key"]:
+                            run_execute("CALL sp_regularize_project_custom_fields(%s);", (p_key,))
+                        st.success("Todos los proyectos activos han sido regularizados exitosamente.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
     with st.form("form_backfill"):
         col_f1, col_f2 = st.columns(2)
@@ -482,12 +519,14 @@ with tab_model:
 
     meta_jira_field_catalog ||--o{ meta_field_homologation : catalogo
     meta_jira_field_catalog ||--o{ fact_issue_custom_values : tipo_campo
+    meta_jira_field_catalog ||--o{ meta_project_field_association : pantallas
+    dim_jira_project ||--o{ meta_project_field_association : configuracion
     
     stg_jira_issues_raw ||--o{ fact_jira_issues_core : transforma
 
     dim_jira_project {
         bigint project_id PK
-        varchar project_key UK
+        varchar project_key "unique"
         varchar project_name
         varchar project_type
         boolean is_sync_enabled
@@ -503,7 +542,7 @@ with tab_model:
 
     fact_jira_issues_core {
         bigint issue_id PK
-        varchar issue_key UK
+        varchar issue_key "unique"
         bigint project_id FK
         varchar summary
         varchar issue_type_name
@@ -530,7 +569,7 @@ with tab_model:
 
     fact_issue_custom_values {
         bigint issue_id PK
-        varchar canonical_name PK
+        varchar canonical_name "PK_part"
         varchar field_id FK
         text val_text
         numeric val_number
@@ -548,7 +587,7 @@ with tab_model:
     }
 
     fact_issue_transitions {
-        bigserial transition_id PK
+        bigint transition_id PK
         bigint issue_id FK
         varchar field_name
         text field_value
@@ -565,8 +604,17 @@ with tab_model:
         boolean is_custom
     }
 
+    meta_project_field_association {
+        bigint project_id PK
+        varchar field_id PK
+        varchar project_key
+        varchar field_name_jira
+        boolean is_custom
+        boolean is_active
+    }
+
     meta_field_homologation {
-        serial homologation_id PK
+        int homologation_id PK
         varchar project_key
         varchar field_id FK
         varchar canonical_name
@@ -638,18 +686,13 @@ with tab_model:
         </style>
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
         <script>
-            // Protección contra paths con longitud cero en motores Chromium (getPointAtLength)
+            // Protección contra paths vacíos en motores Chromium (getPointAtLength)
             (function() {{
                 function safeGetPointAtLength(origFn) {{
                     return function(val) {{
                         try {{
-                            if (typeof this.getTotalLength === 'function') {{
-                                const total = this.getTotalLength();
-                                if (!total || isNaN(total) || total <= 0) {{
-                                    return {{ x: 0, y: 0 }};
-                                }}
-                            }}
-                            return origFn.call(this, val);
+                            const res = origFn.call(this, val);
+                            return res || {{ x: 0, y: 0 }};
                         }} catch (e) {{
                             return {{ x: 0, y: 0 }};
                         }}
@@ -667,6 +710,7 @@ with tab_model:
             const mermaidCode = {json_mermaid_code};
             let currentZoom = 1.0;
             let renderAttempts = 0;
+            let isRendered = false;
 
             function zoom(delta) {{
                 currentZoom = Math.max(0.4, Math.min(2.5, currentZoom + delta));
@@ -686,6 +730,16 @@ with tab_model:
 
             async function renderDiagram() {{
                 try {{
+                    const target = document.getElementById('diagram-svg-target');
+                    if (!target) return;
+                    
+                    // Si el contenedor está en un tab oculto (ancho 0), diferir render
+                    if (target.clientWidth < 50 && renderAttempts < 10) {{
+                        renderAttempts++;
+                        setTimeout(renderDiagram, 200);
+                        return;
+                    }}
+
                     mermaid.initialize({{
                         startOnLoad: false,
                         theme: 'dark',
@@ -702,17 +756,15 @@ with tab_model:
                         }}
                     }});
 
-                    const uniqueId = 'svg_er_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                    const uniqueId = 'svg_er_' + Date.now();
                     const {{ svg }} = await mermaid.render(uniqueId, mermaidCode);
-                    const target = document.getElementById('diagram-svg-target');
-                    if (target) {{
-                        target.innerHTML = svg;
-                    }}
+                    target.innerHTML = svg;
+                    isRendered = true;
                 }} catch (err) {{
                     console.error('Error renderizando diagrama:', err);
-                    if (renderAttempts < 3) {{
+                    if (renderAttempts < 4) {{
                         renderAttempts++;
-                        setTimeout(renderDiagram, 200);
+                        setTimeout(renderDiagram, 250);
                     }} else {{
                         const target = document.getElementById('diagram-svg-target');
                         if (target) {{
@@ -722,10 +774,33 @@ with tab_model:
                 }}
             }}
 
+            // IntersectionObserver para renderizar solo cuando el tab es visible
+            function initObserver() {{
+                const target = document.getElementById('diagram-svg-target');
+                if (!target) return;
+                
+                const observer = new IntersectionObserver((entries) => {{
+                    entries.forEach(entry => {{
+                        if (entry.isIntersecting && !isRendered) {{
+                            renderDiagram();
+                        }}
+                    }});
+                }}, {{ threshold: 0.05 }});
+                
+                observer.observe(target);
+                
+                // Fallback por temporizador
+                setTimeout(() => {{
+                    if (!isRendered && target.clientWidth > 50) {{
+                        renderDiagram();
+                    }}
+                }}, 300);
+            }}
+
             if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', () => setTimeout(renderDiagram, 50));
+                document.addEventListener('DOMContentLoaded', initObserver);
             }} else {{
-                setTimeout(renderDiagram, 50);
+                initObserver();
             }}
         </script>
     </head>

@@ -13,6 +13,13 @@ from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
 
+UNIVERSAL_BASE_FIELDS = [
+    "summary", "description", "issuetype", "status", "priority",
+    "resolution", "resolutiondate", "created", "updated", "duedate",
+    "reporter", "assignee", "creator", "parent", "project",
+    "labels", "components", "timetracking", "timeoriginalestimate", "timespent"
+]
+
 class JiraClient:
     """Cliente para interactuar de forma resiliente con Jira Cloud REST API."""
 
@@ -128,6 +135,74 @@ class JiraClient:
         logger.info(f"Se catalogaron {len(fields)} campos en Jira Cloud.")
         return fields
 
+    def get_project_fields(self, project_key: str) -> Dict[str, Dict[str, Any]]:
+        """
+        Consulta todos los campos configurados en las pantallas (Create/View/Edit) para un proyecto.
+        Recorre los tipos de incidencia vía /rest/api/3/issue/createmeta/{project_key}/issuetypes
+        y para cada uno consulta sus campos vía /rest/api/3/issue/createmeta/{project_key}/issuetypes/{issueTypeId}.
+        Maneja paginación interna si un tipo de incidencia supera los 100 campos.
+        Retorna: {field_id: {"name": str, "is_custom": bool}}
+        """
+        project_fields: Dict[str, Dict[str, Any]] = {}
+
+        try:
+            resp_types = self._request("GET", f"/rest/api/3/issue/createmeta/{project_key}/issuetypes")
+            data_types = resp_types.json()
+            if isinstance(data_types, dict):
+                issue_types = data_types.get("issueTypes") or data_types.get("values", [])
+            elif isinstance(data_types, list):
+                issue_types = data_types
+            else:
+                issue_types = []
+        except Exception as e:
+            logger.warning(f"Error consultando tipos de incidencia para proyecto '{project_key}': {e}")
+            return project_fields
+
+        for itype in issue_types:
+            itype_id = itype.get("id")
+            if not itype_id:
+                continue
+
+            start_at = 0
+            max_results = 100
+
+            while True:
+                try:
+                    params = {"startAt": start_at, "maxResults": max_results}
+                    resp_fields = self._request(
+                        "GET",
+                        f"/rest/api/3/issue/createmeta/{project_key}/issuetypes/{itype_id}",
+                        params=params
+                    )
+                    data_fields = resp_fields.json()
+                    if isinstance(data_fields, dict):
+                        fields_list = data_fields.get("fields") or data_fields.get("values", [])
+                    elif isinstance(data_fields, list):
+                        fields_list = data_fields
+                    else:
+                        fields_list = []
+
+                    for f in fields_list:
+                        fid = f.get("fieldId") or f.get("id") or f.get("key")
+                        fname = f.get("name", fid)
+                        if fid and fid not in project_fields:
+                            is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
+                            project_fields[fid] = {
+                                "name": fname,
+                                "is_custom": is_custom
+                            }
+
+                    total = data_fields.get("total", len(fields_list)) if isinstance(data_fields, dict) else len(fields_list)
+                    if start_at + len(fields_list) >= total or len(fields_list) == 0:
+                        break
+                    start_at += len(fields_list)
+                except Exception as e:
+                    logger.warning(f"Error consultando campos para {project_key} / issueType {itype_id}: {e}")
+                    break
+
+        logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos detectados en pantallas de Jira.")
+        return project_fields
+
     def search_issues_incremental(
         self,
         jql: str,
@@ -138,19 +213,22 @@ class JiraClient:
         """
         Paginador por cursor / nextPageToken de issues con changelog completo.
         Devuelve lotes de issues en formato raw (JSON devuelto por Jira).
+        Si no se especifican 'fields', usa UNIVERSAL_BASE_FIELDS (nunca '*all').
         """
         next_page_token = None
         has_more = True
         total_extracted = 0
 
-        logger.info(f"Iniciando extracción incremental con JQL: {jql}")
+        target_fields = fields if fields is not None else UNIVERSAL_BASE_FIELDS
+
+        logger.info(f"Iniciando extracción incremental con JQL: {jql} ({len(target_fields)} campos solicitados)")
 
         while has_more:
             payload: Dict[str, Any] = {
                 "jql": jql,
                 "maxResults": batch_size,
                 "expand": expand,
-                "fields": fields if fields else ["*all"]
+                "fields": target_fields
             }
             if next_page_token:
                 payload["nextPageToken"] = next_page_token
