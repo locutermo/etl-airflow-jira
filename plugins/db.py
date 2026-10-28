@@ -489,9 +489,9 @@ class DWRepository:
             cur.execute("CALL sp_calculate_changelog_intervals(%s);", (since_dt,))
 
     @staticmethod
-    def refresh_project_sync_stats():
+    def refresh_project_sync_stats(project_key: str = None):
         """Refresca la tabla meta_project_sync_stats llamando al stored procedure en PostgreSQL."""
         with dw_cursor() as cur:
-            cur.execute("CALL sp_refresh_project_sync_stats();")
-            logger.info("Estadísticas en meta_project_sync_stats refrescadas exitosamente mediante sp_refresh_project_sync_stats.")
+            cur.execute("CALL sp_refresh_project_sync_stats(%s);", (project_key,))
+            logger.info(f"Estadísticas en meta_project_sync_stats refrescadas exitosamente (proyecto: {project_key or 'ALL'}).")
 

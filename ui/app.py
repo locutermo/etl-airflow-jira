@@ -40,10 +40,22 @@ def get_db_connection():
         options="-c timezone=America/Lima"
     )
 
-def run_query(query: str, params=None) -> pd.DataFrame:
+@st.cache_data(ttl=15, show_spinner=False)
+def _run_query_cached(query: str, params: tuple = None) -> pd.DataFrame:
     try:
         with get_db_connection() as conn:
             return pd.read_sql_query(query, conn, params=params)
+    except Exception as e:
+        st.error(f"Error de base de datos: {e}")
+        return pd.DataFrame()
+
+def run_query(query: str, params=None, ttl: int = 15) -> pd.DataFrame:
+    hashable_params = tuple(params) if isinstance(params, (list, tuple)) else params
+    if ttl > 0:
+        return _run_query_cached(query, hashable_params)
+    try:
+        with get_db_connection() as conn:
+            return pd.read_sql_query(query, conn, params=hashable_params)
     except Exception as e:
         st.error(f"Error de base de datos: {e}")
         return pd.DataFrame()
@@ -53,6 +65,7 @@ def run_execute(query: str, params=None):
         with conn.cursor() as cur:
             cur.execute(query, params)
         conn.commit()
+    st.cache_data.clear()
 
 def trigger_airflow_dag(dag_id: str, conf: dict = None) -> bool:
     url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
@@ -105,10 +118,10 @@ with tab_daily:
 
     df_counts = run_query("""
         SELECT 
-            (SELECT COUNT(*) FROM dim_jira_project WHERE is_sync_enabled = TRUE) AS total_projects,
-            (SELECT COUNT(*) FROM fact_jira_issues_core WHERE is_deleted = FALSE) AS total_issues,
-            (SELECT COUNT(*) FROM fact_jira_issues_core WHERE is_deleted = TRUE) AS total_deleted,
-            (SELECT COUNT(*) FROM fact_jira_changelog) AS total_changelog;
+            COALESCE((SELECT COUNT(*) FROM dim_jira_project WHERE is_sync_enabled = TRUE), 0) AS total_projects,
+            COALESCE((SELECT n_live_tup FROM pg_stat_user_tables WHERE relname = 'fact_jira_issues_core'), 0)::BIGINT AS total_issues,
+            COALESCE((SELECT SUM(total_deleted_issues) FROM meta_project_sync_stats WHERE is_sync_enabled = TRUE), 0)::BIGINT AS total_deleted,
+            COALESCE((SELECT n_live_tup FROM pg_stat_user_tables WHERE relname = 'fact_jira_changelog'), 0)::BIGINT AS total_changelog;
     """)
 
     col1, col2, col3, col4 = st.columns(4)
@@ -159,6 +172,7 @@ with tab_daily:
         st.markdown("### Proyectos")
     with col_t_btn:
         if st.button("Actualizar"):
+            st.cache_data.clear()
             st.rerun()
 
     col_f1, col_f2 = st.columns([2, 2])
@@ -323,25 +337,32 @@ with tab_daily:
             st.markdown(f"**Campos mapeados en `{selected_proj}`**")
             
             df_tot = run_query(
-                "SELECT COUNT(*) FROM fact_jira_issues_core WHERE project_key = %s AND is_deleted = FALSE;",
+                "SELECT COALESCE(total_active_issues, 0) FROM meta_project_sync_stats WHERE project_key = %s;",
                 (selected_proj,)
             )
             total_proj_issues = int(df_tot.iloc[0, 0]) if not df_tot.empty else 0
 
             df_mapped = run_query("""
+                WITH proj_eav AS (
+                    SELECT canonical_name, COUNT(val_text) AS con_valor
+                    FROM fact_issue_custom_values
+                    WHERE project_key = %s
+                    GROUP BY canonical_name
+                )
                 SELECT 
                     h.field_id AS "ID Campo",
                     c.field_name_jira AS "Nombre Jira",
                     'cf_' || h.canonical_name AS "Columna BD",
                     h.normalization_strategy AS "Tipo",
-                    COUNT(eav.val_text) AS "Con Valor"
+                    COALESCE(SUM(eav.con_valor), 0)::BIGINT AS "Con Valor"
                 FROM meta_field_homologation h
                 JOIN meta_jira_field_catalog c ON h.field_id = c.field_id
-                LEFT JOIN fact_issue_custom_values eav 
-                    ON (eav.canonical_name = h.canonical_name OR eav.canonical_name LIKE concat(h.canonical_name, '_%%'))
-                   AND eav.project_key = %s
+                LEFT JOIN proj_eav eav 
+                    ON eav.canonical_name = h.canonical_name 
+                    OR eav.canonical_name LIKE (h.canonical_name || '_%%')
                 WHERE h.project_key = %s OR h.project_key = 'ALL'
-                GROUP BY h.field_id, c.field_name_jira, h.canonical_name, h.normalization_strategy;
+                GROUP BY h.field_id, c.field_name_jira, h.canonical_name, h.normalization_strategy
+                ORDER BY h.canonical_name ASC;
             """, (selected_proj, selected_proj))
 
             if not df_mapped.empty:
@@ -357,11 +378,15 @@ with tab_daily:
             st.markdown(f"**Campos detectados sin mapeo**")
 
             df_unmapped = run_query("""
-                WITH raw_keys AS (
-                    SELECT DISTINCT jsonb_object_keys(raw_payload->'fields') AS field_id
+                WITH sample_raw AS (
+                    SELECT raw_payload
                     FROM stg_jira_issues_raw
                     WHERE project_key = %s
-                    LIMIT 200
+                    LIMIT 50
+                ),
+                raw_keys AS (
+                    SELECT DISTINCT jsonb_object_keys(raw_payload->'fields') AS field_id
+                    FROM sample_raw
                 )
                 SELECT 
                     r.field_id AS "ID Campo",
@@ -481,17 +506,23 @@ with tab_model:
     st.subheader("Modelo de Datos y Arquitectura de Tablas")
     st.caption("Estructura relacional del Data Warehouse analítico (PostgreSQL 16).")
 
-    # Métricas de volumen por tabla en vivo
+    # Métricas de volumen por tabla en vivo (lectura instantánea desde catálogo de PostgreSQL)
     df_counts = run_query("""
         SELECT 
-            (SELECT count(*) FROM fact_jira_issues_core) AS "fact_jira_issues_core",
-            (SELECT count(*) FROM fact_jira_changelog) AS "fact_jira_changelog",
-            (SELECT count(*) FROM fact_jsm_requests) AS "fact_jsm_requests",
-            (SELECT count(*) FROM fact_issue_custom_values) AS "fact_issue_custom_values",
-            (SELECT count(*) FROM fact_issue_transitions) AS "fact_issue_transitions",
-            (SELECT count(*) FROM dim_jira_project) AS "dim_jira_project",
-            (SELECT count(*) FROM dim_jira_user) AS "dim_jira_user",
-            (SELECT count(*) FROM meta_jira_field_catalog) AS "meta_jira_field_catalog";
+            COALESCE(MAX(CASE WHEN relname = 'fact_jira_issues_core' THEN n_live_tup END), 0)::BIGINT AS "fact_jira_issues_core",
+            COALESCE(MAX(CASE WHEN relname = 'fact_jira_changelog' THEN n_live_tup END), 0)::BIGINT AS "fact_jira_changelog",
+            COALESCE(MAX(CASE WHEN relname = 'fact_jsm_requests' THEN n_live_tup END), 0)::BIGINT AS "fact_jsm_requests",
+            COALESCE(MAX(CASE WHEN relname = 'fact_issue_custom_values' THEN n_live_tup END), 0)::BIGINT AS "fact_issue_custom_values",
+            COALESCE(MAX(CASE WHEN relname = 'fact_issue_transitions' THEN n_live_tup END), 0)::BIGINT AS "fact_issue_transitions",
+            COALESCE(MAX(CASE WHEN relname = 'dim_jira_project' THEN n_live_tup END), 0)::BIGINT AS "dim_jira_project",
+            COALESCE(MAX(CASE WHEN relname = 'dim_jira_user' THEN n_live_tup END), 0)::BIGINT AS "dim_jira_user",
+            COALESCE(MAX(CASE WHEN relname = 'meta_jira_field_catalog' THEN n_live_tup END), 0)::BIGINT AS "meta_jira_field_catalog"
+        FROM pg_stat_user_tables
+        WHERE relname IN (
+            'fact_jira_issues_core', 'fact_jira_changelog', 'fact_jsm_requests',
+            'fact_issue_custom_values', 'fact_issue_transitions', 'dim_jira_project',
+            'dim_jira_user', 'meta_jira_field_catalog'
+        );
     """)
 
     if not df_counts.empty:

@@ -143,7 +143,7 @@ def task_extract_and_stage(**context):
             )
         if current_count % 2500 == 0:
             try:
-                DWRepository.refresh_project_sync_stats()
+                DWRepository.refresh_project_sync_stats(project_key=p_key)
             except Exception:
                 pass
 

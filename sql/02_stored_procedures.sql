@@ -350,7 +350,7 @@ $$;
 -- -----------------------------------------------------------------------------
 -- 5. ACTUALIZACIÓN DE ESTADÍSTICAS OPERATIVAS POR PROYECTO
 -- -----------------------------------------------------------------------------
-CREATE OR REPLACE PROCEDURE sp_refresh_project_sync_stats()
+CREATE OR REPLACE PROCEDURE sp_refresh_project_sync_stats(p_target_project_key VARCHAR DEFAULT NULL)
 LANGUAGE plpgsql
 AS $$
 BEGIN
@@ -377,6 +377,7 @@ BEGIN
         END AS last_sync_status
     FROM dim_jira_project p
     LEFT JOIN fact_jira_issues_core c ON p.project_id = c.project_id
+    WHERE (p_target_project_key IS NULL OR p.project_key = p_target_project_key)
     GROUP BY p.project_id, p.project_key, p.project_name, p.project_type, p.is_sync_enabled
     ON CONFLICT (project_id) DO UPDATE SET
         project_key = EXCLUDED.project_key,
