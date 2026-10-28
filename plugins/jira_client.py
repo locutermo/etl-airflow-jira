@@ -50,7 +50,13 @@ class JiraClient:
             "User-Agent": "GobiernoTI-Airflow-ETL/2.0"
         })
 
-    def _request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        raise_for_status: bool = True,
+        **kwargs
+    ) -> requests.Response:
         """
         Ejecuta una petición HTTP con manejo inteligente de cabecera Retry-After y Backoff exponencial con jitter.
         """
@@ -86,7 +92,8 @@ class JiraClient:
                     time.sleep(sleep_time)
                     continue
 
-                response.raise_for_status()
+                if raise_for_status:
+                    response.raise_for_status()
                 return response
 
             except (requests.ConnectionError, requests.Timeout) as e:
@@ -138,112 +145,124 @@ class JiraClient:
     def get_project_fields(self, project_key: str) -> Dict[str, Dict[str, Any]]:
         """
         Consulta todos los campos configurados en las pantallas (Create/View/Edit) para un proyecto.
-        Recorre los tipos de incidencia vía /rest/api/3/issue/createmeta/{project_key}/issuetypes
-        y para cada uno consulta sus campos vía /rest/api/3/issue/createmeta/{project_key}/issuetypes/{issueTypeId}.
-        Maneja paginación interna si un tipo de incidencia supera los 100 campos.
+        Estrategia 1: /rest/api/3/issue/createmeta/{project_key}/issuetypes (rápido para proyectos con permisos de creación).
+        Estrategia 2 (Fallback): Jerarquía de esquemas de pantallas (para proyectos de solo lectura o sin permiso de creación).
         Retorna: {field_id: {"name": str, "is_custom": bool}}
         """
         project_fields: Dict[str, Dict[str, Any]] = {}
 
+        # 1. Intentar createmeta
         try:
-            resp_types = self._request("GET", f"/rest/api/3/issue/createmeta/{project_key}/issuetypes")
-            data_types = resp_types.json()
-            if isinstance(data_types, dict):
-                issue_types = data_types.get("issueTypes") or data_types.get("values", [])
-            elif isinstance(data_types, list):
-                issue_types = data_types
+            resp_types = self._request("GET", f"/rest/api/3/issue/createmeta/{project_key}/issuetypes", raise_for_status=False)
+            if resp_types.status_code == 200:
+                data_types = resp_types.json()
+                if isinstance(data_types, dict):
+                    issue_types = data_types.get("issueTypes") or data_types.get("values", [])
+                elif isinstance(data_types, list):
+                    issue_types = data_types
+                else:
+                    issue_types = []
+
+                for itype in issue_types:
+                    itype_id = itype.get("id")
+                    if not itype_id:
+                        continue
+
+                    start_at = 0
+                    max_results = 100
+
+                    while True:
+                        try:
+                            params = {"startAt": start_at, "maxResults": max_results}
+                            resp_fields = self._request(
+                                "GET",
+                                f"/rest/api/3/issue/createmeta/{project_key}/issuetypes/{itype_id}",
+                                params=params,
+                                raise_for_status=False
+                            )
+                            if resp_fields.status_code != 200:
+                                break
+
+                            data_fields = resp_fields.json()
+                            if isinstance(data_fields, dict):
+                                fields_list = data_fields.get("fields") or data_fields.get("values", [])
+                            elif isinstance(data_fields, list):
+                                fields_list = data_fields
+                            else:
+                                fields_list = []
+
+                            for f in fields_list:
+                                fid = f.get("fieldId") or f.get("id") or f.get("key")
+                                fname = f.get("name", fid)
+                                if fid and fid not in project_fields:
+                                    is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
+                                    project_fields[fid] = {
+                                        "name": fname,
+                                        "is_custom": is_custom
+                                    }
+
+                            total = data_fields.get("total", len(fields_list)) if isinstance(data_fields, dict) else len(fields_list)
+                            if start_at + len(fields_list) >= total or len(fields_list) == 0:
+                                break
+                            start_at += len(fields_list)
+                        except Exception:
+                            break
+            elif resp_types.status_code in (403, 404):
+                logger.info(f"Proyecto '{project_key}': createmeta no habilitado (HTTP {resp_types.status_code}). Aplicando fallback de esquemas de pantalla...")
             else:
-                issue_types = []
+                logger.info(f"Proyecto '{project_key}': createmeta devolvió HTTP {resp_types.status_code}. Aplicando fallback de esquemas de pantalla...")
         except Exception as e:
-            logger.warning(f"createmeta no disponible para proyecto '{project_key}': {e}. Se intentará fallback de pantallas.")
-            issue_types = []
+            logger.info(f"Proyecto '{project_key}': createmeta no disponible ({e}). Aplicando fallback de esquemas de pantalla...")
 
-        for itype in issue_types:
-            itype_id = itype.get("id")
-            if not itype_id:
-                continue
-
-            start_at = 0
-            max_results = 100
-
-            while True:
-                try:
-                    params = {"startAt": start_at, "maxResults": max_results}
-                    resp_fields = self._request(
-                        "GET",
-                        f"/rest/api/3/issue/createmeta/{project_key}/issuetypes/{itype_id}",
-                        params=params
-                    )
-                    data_fields = resp_fields.json()
-                    if isinstance(data_fields, dict):
-                        fields_list = data_fields.get("fields") or data_fields.get("values", [])
-                    elif isinstance(data_fields, list):
-                        fields_list = data_fields
-                    else:
-                        fields_list = []
-
-                    for f in fields_list:
-                        fid = f.get("fieldId") or f.get("id") or f.get("key")
-                        fname = f.get("name", fid)
-                        if fid and fid not in project_fields:
-                            is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
-                            project_fields[fid] = {
-                                "name": fname,
-                                "is_custom": is_custom
-                            }
-
-                    total = data_fields.get("total", len(fields_list)) if isinstance(data_fields, dict) else len(fields_list)
-                    if start_at + len(fields_list) >= total or len(fields_list) == 0:
-                        break
-                    start_at += len(fields_list)
-                except Exception as e:
-                    logger.warning(f"Error consultando campos para {project_key} / issueType {itype_id}: {e}")
-                    break
-
-        logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos detectados en createmeta de Jira.")
-
-        # Fallback: Si createmeta no tiene permisos en este proyecto (ej. HTTP 404 'You cannot create issues in this project'),
-        # consultamos la jerarquía formal de esquemas de pantallas:
-        # project -> issuetypescreenscheme -> screenscheme -> screens/{id}/tabs/{id}/fields
+        # 2. Fallback: Jerarquía formal de esquemas de pantallas
         if not project_fields:
             try:
-                logger.info(f"Aplicando fallback de jerarquía de pantallas para proyecto '{project_key}'...")
-                p_resp = self._request("GET", f"/rest/api/3/project/{project_key}")
-                p_id = p_resp.json().get("id")
-                if p_id:
-                    scheme_resp = self._request("GET", f"/rest/api/3/issuetypescreenscheme/project?projectId={p_id}")
-                    vals = scheme_resp.json().get("values", [])
-                    if vals:
-                        scheme_id = vals[0].get("issueTypeScreenScheme", {}).get("id")
-                        if scheme_id:
-                            mappings = self._request("GET", f"/rest/api/3/issuetypescreenscheme/mapping?issueTypeScreenSchemeId={scheme_id}").json().get("values", [])
-                            screen_scheme_ids = list(set(m.get("screenSchemeId") for m in mappings if m.get("screenSchemeId")))
-                            
-                            screen_ids = set()
-                            for sc_id in screen_scheme_ids:
-                                sc = self._request("GET", f"/rest/api/3/screenscheme?id={sc_id}").json()
-                                for v in sc.get("values", []):
-                                    for s_type, s_id in v.get("screens", {}).items():
-                                        screen_ids.add(s_id)
+                p_resp = self._request("GET", f"/rest/api/3/project/{project_key}", raise_for_status=False)
+                if p_resp.status_code == 200:
+                    p_id = p_resp.json().get("id")
+                    if p_id:
+                        scheme_resp = self._request("GET", f"/rest/api/3/issuetypescreenscheme/project?projectId={p_id}", raise_for_status=False)
+                        if scheme_resp.status_code == 200:
+                            vals = scheme_resp.json().get("values", [])
+                            if vals:
+                                scheme_id = vals[0].get("issueTypeScreenScheme", {}).get("id")
+                                if scheme_id:
+                                    m_resp = self._request("GET", f"/rest/api/3/issuetypescreenscheme/mapping?issueTypeScreenSchemeId={scheme_id}", raise_for_status=False)
+                                    if m_resp.status_code == 200:
+                                        mappings = m_resp.json().get("values", [])
+                                        screen_scheme_ids = list(set(m.get("screenSchemeId") for m in mappings if m.get("screenSchemeId")))
+                                        
+                                        screen_ids = set()
+                                        for sc_id in screen_scheme_ids:
+                                            sc_resp = self._request("GET", f"/rest/api/3/screenscheme?id={sc_id}", raise_for_status=False)
+                                            if sc_resp.status_code == 200:
+                                                sc = sc_resp.json()
+                                                for v in sc.get("values", []):
+                                                    for s_type, s_id in v.get("screens", {}).items():
+                                                        screen_ids.add(s_id)
 
-                            for s_id in screen_ids:
-                                tabs = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs").json()
-                                for tab in tabs:
-                                    t_id = tab.get("id")
-                                    t_fields = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs/{t_id}/fields").json()
-                                    for f in t_fields:
-                                        fid = f.get("id")
-                                        fname = f.get("name", fid)
-                                        if fid and fid not in project_fields:
-                                            is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
-                                            project_fields[fid] = {
-                                                "name": fname,
-                                                "is_custom": is_custom
-                                            }
-                logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos obtenidos vía jerarquía de pantallas.")
+                                        for s_id in screen_ids:
+                                            tabs_resp = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs", raise_for_status=False)
+                                            if tabs_resp.status_code == 200:
+                                                tabs = tabs_resp.json()
+                                                for tab in tabs:
+                                                    t_id = tab.get("id")
+                                                    tf_resp = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs/{t_id}/fields", raise_for_status=False)
+                                                    if tf_resp.status_code == 200:
+                                                        t_fields = tf_resp.json()
+                                                        for f in t_fields:
+                                                            fid = f.get("id")
+                                                            fname = f.get("name", fid)
+                                                            if fid and fid not in project_fields:
+                                                                is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
+                                                                project_fields[fid] = {
+                                                                    "name": fname,
+                                                                    "is_custom": is_custom
+                                                                }
             except Exception as e_fb:
                 logger.warning(f"Fallback de pantallas para '{project_key}' finalizó con advertencia: {e_fb}")
 
+        logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos detectados en pantallas de Jira.")
         return project_fields
 
     def search_issues_incremental(

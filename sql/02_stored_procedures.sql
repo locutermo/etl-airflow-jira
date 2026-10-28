@@ -350,6 +350,7 @@ $$;
 -- -----------------------------------------------------------------------------
 -- 5. ACTUALIZACIÓN DE ESTADÍSTICAS OPERATIVAS POR PROYECTO
 -- -----------------------------------------------------------------------------
+DROP PROCEDURE IF EXISTS sp_refresh_project_sync_stats();
 CREATE OR REPLACE PROCEDURE sp_refresh_project_sync_stats(p_target_project_key VARCHAR DEFAULT NULL)
 LANGUAGE plpgsql
 AS $$

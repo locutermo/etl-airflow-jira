@@ -33,6 +33,7 @@ services:
   postgres-airflow:
     image: postgres:15-alpine
     container_name: gobti-airflow-metadb
+    shm_size: 256mb
     environment:
       POSTGRES_USER: ${AIRFLOW_DB_USER:-airflow}
       POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflow_pass_gobierno}
@@ -50,6 +51,7 @@ services:
   postgres-dw:
     image: postgres:16-alpine
     container_name: gobti-jira-dw
+    shm_size: 512mb
     environment:
       POSTGRES_USER: ${DW_USER:-dw_admin}
       POSTGRES_PASSWORD: ${DW_PASSWORD:-dw_pass_gobierno_2026}

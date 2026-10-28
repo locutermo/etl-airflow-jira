@@ -10,6 +10,7 @@ Optimizada para Servidores de 8 GB RAM (huella de memoria < 400 MB).
 import os
 from datetime import datetime, timedelta
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
@@ -59,11 +60,11 @@ def task_sync_metadata(**context):
     fields = client.get_fields()
     DWRepository.upsert_fields(fields)
 
-    # Sincronización diferencial de campos por proyecto (solo proyectos activos)
+    # Sincronización diferencial de campos por proyecto (solo proyectos activos en paralelo)
     active_projects = DWRepository.get_active_projects()
-    logger.info(f"Sincronizando campos asignados a pantallas para {len(active_projects)} proyectos activos...")
+    logger.info(f"Sincronizando campos asignados a pantallas para {len(active_projects)} proyectos activos en paralelo...")
 
-    for p in active_projects:
+    def _sync_single_project(p):
         p_id = p["project_id"]
         p_key = p["project_key"]
         try:
@@ -72,6 +73,9 @@ def task_sync_metadata(**context):
                 DWRepository.sync_project_fields_differential(p_id, p_key, p_fields)
         except Exception as e:
             logger.warning(f"Error sincronizando campos para proyecto '{p_key}': {e}")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        list(executor.map(_sync_single_project, active_projects))
 
 def task_extract_and_stage(**context):
     """
@@ -106,31 +110,37 @@ def task_extract_and_stage(**context):
 
     with get_dw_connection() as conn:
         with conn.cursor() as cur:
-            for p_key in target_keys:
-                if since_date_param and str(since_date_param).strip():
-                    watermark_str = str(since_date_param).strip()
+            cur.execute("""
+                SELECT project_key, MAX(updated_at)
+                FROM fact_jira_issues_core
+                WHERE is_deleted = false
+                GROUP BY project_key;
+            """)
+            dw_watermarks = {row[0]: row[1] for row in cur.fetchall()}
+
+    for p_key in target_keys:
+        if since_date_param and str(since_date_param).strip():
+            watermark_str = str(since_date_param).strip()
+        else:
+            last_p_upd = dw_watermarks.get(p_key)
+            if last_p_upd:
+                if last_p_upd.tzinfo is None:
+                    last_p_upd = LIMA_TZ.localize(last_p_upd)
                 else:
-                    cur.execute("SELECT MAX(updated_at) FROM fact_jira_issues_core WHERE project_key = %s;", (p_key,))
-                    row = cur.fetchone()
-                    last_p_upd = row[0] if row else None
-                    if last_p_upd:
-                        if last_p_upd.tzinfo is None:
-                            last_p_upd = LIMA_TZ.localize(last_p_upd)
-                        else:
-                            last_p_upd = last_p_upd.astimezone(LIMA_TZ)
-                        since_dt = last_p_upd - timedelta(minutes=15)
-                        watermark_str = since_dt.strftime("%Y-%m-%d %H:%M")
-                    else:
-                        watermark_str = "2020-01-01 00:00"
+                    last_p_upd = last_p_upd.astimezone(LIMA_TZ)
+                since_dt = last_p_upd - timedelta(minutes=15)
+                watermark_str = since_dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                watermark_str = "2020-01-01 00:00"
 
-                # Obtener campos quirúrgicos (universales + custom fields activos del proyecto)
-                p_fields = DWRepository.get_fields_for_project_extraction(p_key, UNIVERSAL_BASE_FIELDS)
+        # Obtener campos quirúrgicos (universales + custom fields activos del proyecto)
+        p_fields = DWRepository.get_fields_for_project_extraction(p_key, UNIVERSAL_BASE_FIELDS)
 
-                project_configs.append({
-                    "project_key": p_key,
-                    "since_date_str": watermark_str,
-                    "fields": p_fields
-                })
+        project_configs.append({
+            "project_key": p_key,
+            "since_date_str": watermark_str,
+            "fields": p_fields
+        })
 
     # 3. Callback para checkpoints intermedios
     def on_checkpoint(current_count, max_dt, p_key):
@@ -180,11 +190,14 @@ def task_transform_and_load(**context):
     conn = get_dw_connection()
     try:
         with conn.cursor() as cur:
+            # Desactivar paralelismo costoso en queries de jsonb para evitar exceder shared memory (/dev/shm)
+            cur.execute("SET max_parallel_workers_per_gather = 0;")
             cur.execute("""
                 SELECT s.raw_payload
                 FROM stg_jira_issues_raw s
-                LEFT JOIN fact_jira_issues_core c ON s.issue_id = c.issue_id
-                WHERE c.issue_id IS NULL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM fact_jira_issues_core c WHERE c.issue_id = s.issue_id
+                )
                 LIMIT 500;
             """)
             missing_rows = cur.fetchall()
