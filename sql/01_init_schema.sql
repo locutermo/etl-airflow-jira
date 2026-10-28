@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS fact_jira_issues_core (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_core_project ON fact_jira_issues_core(project_key) WHERE is_deleted = FALSE;
+CREATE INDEX IF NOT EXISTS idx_fact_core_project_id ON fact_jira_issues_core(project_id);
 CREATE INDEX IF NOT EXISTS idx_fact_core_updated ON fact_jira_issues_core(updated_at);
 CREATE INDEX IF NOT EXISTS idx_fact_core_parent ON fact_jira_issues_core(parent_issue_key);
 CREATE INDEX IF NOT EXISTS idx_fact_core_epic ON fact_jira_issues_core(epic_issue_key);

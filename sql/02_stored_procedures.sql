@@ -392,3 +392,24 @@ BEGIN
 END;
 $$;
 
+-- -----------------------------------------------------------------------------
+-- 6. TRIGGER DE INTEGRIDAD PARA ESTADÍSTICAS POR PROYECTO
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION trg_fix_project_sync_stats()
+RETURNS TRIGGER AS $$
+BEGIN
+    SELECT MAX(dw_updated_at), MAX(updated_at)
+    INTO NEW.last_etl_sync_at, NEW.last_issue_updated_in_jira
+    FROM fact_jira_issues_core
+    WHERE project_id = NEW.project_id;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_project_sync_stats_clean ON meta_project_sync_stats;
+CREATE TRIGGER trg_project_sync_stats_clean
+BEFORE INSERT OR UPDATE ON meta_project_sync_stats
+FOR EACH ROW
+EXECUTE FUNCTION trg_fix_project_sync_stats();
+
