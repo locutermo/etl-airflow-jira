@@ -495,3 +495,67 @@ class DWRepository:
             cur.execute("CALL sp_refresh_project_sync_stats(%s);", (project_key,))
             logger.info(f"Estadísticas en meta_project_sync_stats refrescadas exitosamente (proyecto: {project_key or 'ALL'}).")
 
+    @staticmethod
+    def update_thread_status(
+        worker_id: str,
+        thread_name: str,
+        current_project: Optional[str],
+        status: str,
+        total_batches: int = 0,
+        total_issues: int = 0,
+        last_issue_key: Optional[str] = None,
+        queue_depth: int = 0
+    ):
+        """Actualiza el estado y latido en tiempo real de un worker en meta_etl_thread_monitor."""
+        try:
+            with dw_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO meta_etl_thread_monitor (
+                        worker_id, thread_name, current_project, status,
+                        total_batches, total_issues, last_issue_key, queue_depth,
+                        last_heartbeat, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT (worker_id) DO UPDATE SET
+                        thread_name = EXCLUDED.thread_name,
+                        current_project = EXCLUDED.current_project,
+                        status = EXCLUDED.status,
+                        total_batches = EXCLUDED.total_batches,
+                        total_issues = EXCLUDED.total_issues,
+                        last_issue_key = COALESCE(EXCLUDED.last_issue_key, meta_etl_thread_monitor.last_issue_key),
+                        queue_depth = EXCLUDED.queue_depth,
+                        last_heartbeat = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP;
+                """, (
+                    worker_id, thread_name, current_project, status,
+                    total_batches, total_issues, last_issue_key, queue_depth
+                ))
+        except Exception as e:
+            logger.debug(f"Error actualizando thread monitor para {worker_id}: {e}")
+
+    @staticmethod
+    def reset_thread_monitor():
+        """Inicializa los workers en IDLE al comenzar un ciclo de extracción."""
+        try:
+            with dw_cursor() as cur:
+                cur.execute("UPDATE meta_etl_thread_monitor SET status = 'IDLE', current_project = NULL, queue_depth = 0;")
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_thread_monitor_status() -> List[Dict[str, Any]]:
+        """Obtiene el estado de todos los hilos para el dashboard en tiempo real."""
+        with dw_cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    worker_id, thread_name, current_project, status,
+                    total_batches, total_issues, last_issue_key, queue_depth,
+                    last_heartbeat,
+                    GREATEST(0, EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_heartbeat))::INT) AS seconds_since_heartbeat
+                FROM meta_etl_thread_monitor
+                ORDER BY worker_id ASC;
+            """)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+

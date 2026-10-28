@@ -59,14 +59,38 @@ class MemorySafeParallelExtractor:
         """
         Hilo Productor: Extrae issues de un único proyecto paginando por nextPageToken.
         Deposita los lotes en la cola acotada; se bloquea si la cola está llena (Backpressure).
+        Reporta telemetría a meta_etl_thread_monitor.
         """
         if self._stop_event.is_set():
             return
 
+        t_name = threading.current_thread().name
+        # Generar worker_id amigable (ej: Worker-1, Worker-2)
+        worker_suffix = t_name.split("_")[-1] if "_" in t_name else "1"
+        try:
+            worker_num = int(worker_suffix) + 1
+            worker_id = f"Worker-{worker_num}"
+        except Exception:
+            worker_id = f"Worker-{worker_suffix}"
+
         jql = f'project = "{project_key}" AND updated >= "{since_date_str}" ORDER BY updated ASC'
-        logger.info(f"[Productor {project_key}] Iniciando extracción (JQL: {jql}, {len(fields)} campos quirúrgicos).")
+        logger.info(f"[{worker_id} / {project_key}] Iniciando extracción (JQL: {jql}, {len(fields)} campos quirúrgicos).")
+
+        DWRepository.update_thread_status(
+            worker_id=worker_id,
+            thread_name=t_name,
+            current_project=project_key,
+            status="EXTRACTING",
+            total_batches=0,
+            total_issues=0,
+            last_issue_key=None,
+            queue_depth=self._queue.qsize()
+        )
 
         proj_count = 0
+        proj_batches = 0
+        last_key = None
+
         try:
             for raw_batch in self.client.search_issues_incremental(
                 jql=jql,
@@ -79,21 +103,68 @@ class MemorySafeParallelExtractor:
                 if not raw_batch:
                     continue
 
-                proj_count += len(raw_batch)
+                batch_len = len(raw_batch)
+                proj_count += batch_len
+                proj_batches += 1
+                last_key = raw_batch[-1].get("key") or last_key
 
-                # Bloquea si la cola está llena (maxsize=6), liberando CPU y pausando ingesta de RAM
+                # Actualizar estado de progreso del hilo
+                DWRepository.update_thread_status(
+                    worker_id=worker_id,
+                    thread_name=t_name,
+                    current_project=project_key,
+                    status="EXTRACTING",
+                    total_batches=proj_batches,
+                    total_issues=proj_count,
+                    last_issue_key=last_key,
+                    queue_depth=self._queue.qsize()
+                )
+
+                # Bloquea si la cola está llena (maxsize=6), liberando CPU y pausando ingesta de RAM (Backpressure)
                 self._queue.put((project_key, raw_batch), block=True)
 
-            logger.info(f"[Productor {project_key}] Finalizado con éxito. Total issues extraídos: {proj_count}.")
+            logger.info(f"[{worker_id} / {project_key}] Finalizado con éxito. Total issues: {proj_count}.")
+            DWRepository.update_thread_status(
+                worker_id=worker_id,
+                thread_name=t_name,
+                current_project=None,
+                status="IDLE",
+                total_batches=proj_batches,
+                total_issues=proj_count,
+                last_issue_key=last_key,
+                queue_depth=self._queue.qsize()
+            )
         except Exception as e:
-            logger.error(f"[Productor {project_key}] Error durante la extracción: {e}", exc_info=True)
+            logger.error(f"[{worker_id} / {project_key}] Error durante la extracción: {e}", exc_info=True)
+            DWRepository.update_thread_status(
+                worker_id=worker_id,
+                thread_name=t_name,
+                current_project=project_key,
+                status="ERROR",
+                total_batches=proj_batches,
+                total_issues=proj_count,
+                last_issue_key=last_key,
+                queue_depth=self._queue.qsize()
+            )
 
     def _consumer_writer(self):
         """
         Hilo Consumidor: Recibe lotes de la cola, inserta en Staging y transforma a Core en PostgreSQL.
-        Garantiza recolección de basura inmediata tras cada lote.
+        Garantiza recolección de basura inmediata tras cada lote y reporta telemetría.
         """
         logger.info("[Consumidor BD] Hilo escritor en PostgreSQL iniciado.")
+        DWRepository.update_thread_status(
+            worker_id="DB-Consumer",
+            thread_name="DW-Consumer-Thread",
+            current_project=None,
+            status="IDLE",
+            total_batches=0,
+            total_issues=0,
+            last_issue_key=None,
+            queue_depth=0
+        )
+
+        consumer_batches = 0
 
         while True:
             item = self._queue.get()
@@ -102,6 +173,20 @@ class MemorySafeParallelExtractor:
                 break
 
             project_key, batch = item
+            consumer_batches += 1
+            last_issue_key = batch[-1].get("key") if batch else None
+
+            DWRepository.update_thread_status(
+                worker_id="DB-Consumer",
+                thread_name="DW-Consumer-Thread",
+                current_project=project_key,
+                status="WRITING_TO_DW",
+                total_batches=consumer_batches,
+                total_issues=self._total_processed + len(batch),
+                last_issue_key=last_issue_key,
+                queue_depth=self._queue.qsize()
+            )
+
             try:
                 # 1. Inserción cruda en Staging (JSONB)
                 DWRepository.upsert_raw_staging(batch)
@@ -145,6 +230,16 @@ class MemorySafeParallelExtractor:
                 self._queue.task_done()
 
         logger.info("[Consumidor BD] Hilo escritor finalizado.")
+        DWRepository.update_thread_status(
+            worker_id="DB-Consumer",
+            thread_name="DW-Consumer-Thread",
+            current_project=None,
+            status="COMPLETED",
+            total_batches=consumer_batches,
+            total_issues=self._total_processed,
+            last_issue_key=None,
+            queue_depth=0
+        )
 
     def run(
         self,
@@ -164,6 +259,7 @@ class MemorySafeParallelExtractor:
         self._total_processed = 0
         self._consumer_exception = None
         self._stop_event.clear()
+        DWRepository.reset_thread_monitor()
 
         # 1. Iniciar hilo consumidor
         consumer_thread = threading.Thread(target=self._consumer_writer, name="DW-Consumer-Thread", daemon=True)

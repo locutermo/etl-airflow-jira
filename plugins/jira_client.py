@@ -155,8 +155,8 @@ class JiraClient:
             else:
                 issue_types = []
         except Exception as e:
-            logger.warning(f"Error consultando tipos de incidencia para proyecto '{project_key}': {e}")
-            return project_fields
+            logger.warning(f"createmeta no disponible para proyecto '{project_key}': {e}. Se intentará fallback de pantallas.")
+            issue_types = []
 
         for itype in issue_types:
             itype_id = itype.get("id")
@@ -200,7 +200,50 @@ class JiraClient:
                     logger.warning(f"Error consultando campos para {project_key} / issueType {itype_id}: {e}")
                     break
 
-        logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos detectados en pantallas de Jira.")
+        logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos detectados en createmeta de Jira.")
+
+        # Fallback: Si createmeta no tiene permisos en este proyecto (ej. HTTP 404 'You cannot create issues in this project'),
+        # consultamos la jerarquía formal de esquemas de pantallas:
+        # project -> issuetypescreenscheme -> screenscheme -> screens/{id}/tabs/{id}/fields
+        if not project_fields:
+            try:
+                logger.info(f"Aplicando fallback de jerarquía de pantallas para proyecto '{project_key}'...")
+                p_resp = self._request("GET", f"/rest/api/3/project/{project_key}")
+                p_id = p_resp.json().get("id")
+                if p_id:
+                    scheme_resp = self._request("GET", f"/rest/api/3/issuetypescreenscheme/project?projectId={p_id}")
+                    vals = scheme_resp.json().get("values", [])
+                    if vals:
+                        scheme_id = vals[0].get("issueTypeScreenScheme", {}).get("id")
+                        if scheme_id:
+                            mappings = self._request("GET", f"/rest/api/3/issuetypescreenscheme/mapping?issueTypeScreenSchemeId={scheme_id}").json().get("values", [])
+                            screen_scheme_ids = list(set(m.get("screenSchemeId") for m in mappings if m.get("screenSchemeId")))
+                            
+                            screen_ids = set()
+                            for sc_id in screen_scheme_ids:
+                                sc = self._request("GET", f"/rest/api/3/screenscheme?id={sc_id}").json()
+                                for v in sc.get("values", []):
+                                    for s_type, s_id in v.get("screens", {}).items():
+                                        screen_ids.add(s_id)
+
+                            for s_id in screen_ids:
+                                tabs = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs").json()
+                                for tab in tabs:
+                                    t_id = tab.get("id")
+                                    t_fields = self._request("GET", f"/rest/api/3/screens/{s_id}/tabs/{t_id}/fields").json()
+                                    for f in t_fields:
+                                        fid = f.get("id")
+                                        fname = f.get("name", fid)
+                                        if fid and fid not in project_fields:
+                                            is_custom = bool(fid.startswith("customfield_") or f.get("custom", False))
+                                            project_fields[fid] = {
+                                                "name": fname,
+                                                "is_custom": is_custom
+                                            }
+                logger.info(f"Proyecto '{project_key}': {len(project_fields)} campos obtenidos vía jerarquía de pantallas.")
+            except Exception as e_fb:
+                logger.warning(f"Fallback de pantallas para '{project_key}' finalizó con advertencia: {e_fb}")
+
         return project_fields
 
     def search_issues_incremental(

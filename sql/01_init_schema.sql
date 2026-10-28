@@ -17,6 +17,20 @@ CREATE TABLE IF NOT EXISTS meta_etl_watermarks (
     error_message TEXT
 );
 
+-- Telemetría de Hilos de Extracción Concurrente (Dashboard en Tiempo Real)
+CREATE TABLE IF NOT EXISTS meta_etl_thread_monitor (
+    worker_id VARCHAR(50) PRIMARY KEY,          -- 'Worker-1', 'Worker-2', 'Worker-3', 'DB-Consumer'
+    thread_name VARCHAR(100) NOT NULL,
+    current_project VARCHAR(30),
+    status VARCHAR(30) DEFAULT 'IDLE',          -- 'EXTRACTING', 'IDLE', 'WAITING_QUEUE', 'COMPLETED'
+    total_batches INT DEFAULT 0,
+    total_issues INT DEFAULT 0,
+    last_issue_key VARCHAR(50),
+    queue_depth INT DEFAULT 0,                  -- Profundidad de la cola buffer (0 a 6)
+    last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Catálogo Maestro de Espacios de Trabajo (Proyectos)
 CREATE TABLE IF NOT EXISTS dim_jira_project (
     project_id BIGINT PRIMARY KEY,               -- ID inmutable en Jira (ej. 10024)
