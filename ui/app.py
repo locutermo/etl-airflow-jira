@@ -141,7 +141,11 @@ with tab_daily:
                 dt_ts = dt_ts.tz_convert('America/Lima')
             last_sync_str = dt_ts.strftime("%d/%m/%Y %H:%M (GMT-5)")
 
-    col1.metric("Estado del Pipeline", status_str, f"Último Sync: {last_sync_str}")
+    rec_proc = int(df_watermark.iloc[0]["records_processed"]) if not df_watermark.empty and pd.notnull(df_watermark.iloc[0]["records_processed"]) else 0
+    if w_status == "RUNNING":
+        col1.metric("Estado del Pipeline", status_str, f"🔄 Lote actual: {rec_proc:,}")
+    else:
+        col1.metric("Estado del Pipeline", status_str, f"Último Sync: {last_sync_str}")
 
     tot_proj = df_counts.iloc[0]["total_projects"] if not df_counts.empty else 0
     tot_iss = df_counts.iloc[0]["total_issues"] if not df_counts.empty else 0
