@@ -464,7 +464,11 @@ with tab_model:
         c3.metric("Tickets JSM", f"{df_counts['fact_jsm_requests'].iloc[0]:,}")
         c4.metric("Usuarios Dimensionados", f"{df_counts['dim_jira_user'].iloc[0]:,}")
 
-    st.markdown("#### Diagrama Entidad - Relación (ER)")
+    col_diag_header, col_diag_ctrl = st.columns([3, 1])
+    with col_diag_header:
+        st.markdown("#### Diagrama Entidad - Relación (ER)")
+    with col_diag_ctrl:
+        diag_height = st.slider("Altura del visor (px)", min_value=750, max_value=1600, value=1050, step=50)
 
     mermaid_diagram = """
     erDiagram
@@ -604,8 +608,8 @@ with tab_model:
                 color: #c9d1d9;
                 border: 1px solid #30363d;
                 border-radius: 6px;
-                padding: 4px 10px;
-                font-size: 12px;
+                padding: 6px 12px;
+                font-size: 13px;
                 cursor: pointer;
             }}
             .toolbar button:hover {{
@@ -617,21 +621,26 @@ with tab_model:
                 background: #0e1117;
                 border: 1px solid #30363d;
                 border-radius: 8px;
-                padding: 20px;
+                padding: 24px;
                 text-align: center;
-                max-height: 680px;
+                height: {diag_height - 65}px;
+                box-sizing: border-box;
             }}
             .mermaid {{
                 display: inline-block;
                 transform-origin: top center;
                 transition: transform 0.15s ease-in-out;
             }}
+            .mermaid svg {{
+                max-width: none !important;
+                height: auto;
+            }}
         </style>
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
         <script>
             let currentZoom = 1.0;
             function zoom(delta) {{
-                currentZoom = Math.max(0.5, Math.min(2.0, currentZoom + delta));
+                currentZoom = Math.max(0.4, Math.min(2.5, currentZoom + delta));
                 const el = document.querySelector('.mermaid');
                 if (el) {{
                     el.style.transform = `scale(${{currentZoom}})`;
@@ -649,6 +658,9 @@ with tab_model:
                     mermaid.initialize({{
                         startOnLoad: true,
                         theme: 'dark',
+                        er: {{
+                            useMaxWidth: false
+                        }},
                         themeVariables: {{
                             darkMode: true,
                             background: '#0e1117',
@@ -657,7 +669,8 @@ with tab_model:
                             primaryBorderColor: '#388bfd',
                             lineColor: '#58a6ff',
                             secondaryColor: '#238636',
-                            tertiaryColor: '#161b22'
+                            tertiaryColor: '#161b22',
+                            fontSize: '13px'
                         }}
                     }});
                 }} catch (e) {{
@@ -680,7 +693,7 @@ with tab_model:
     </body>
     </html>
     """
-    components.html(mermaid_html, height=750, scrolling=True)
+    components.html(mermaid_html, height=diag_height, scrolling=False)
 
     st.markdown("---")
     st.markdown("#### Detalle de Capas y Tablas")
