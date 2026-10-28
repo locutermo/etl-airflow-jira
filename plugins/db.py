@@ -534,11 +534,29 @@ class DWRepository:
             logger.debug(f"Error actualizando thread monitor para {worker_id}: {e}")
 
     @staticmethod
-    def reset_thread_monitor():
-        """Inicializa los workers en IDLE al comenzar un ciclo de extracción."""
+    def reset_thread_monitor(active_workers: int = 3):
+        """Inicializa los workers en IDLE o STANDBY según la cantidad requerida por el volumen a extraer."""
         try:
             with dw_cursor() as cur:
-                cur.execute("UPDATE meta_etl_thread_monitor SET status = 'IDLE', current_project = NULL, queue_depth = 0;")
+                cur.execute("""
+                    INSERT INTO meta_etl_thread_monitor (
+                        worker_id, thread_name, status, total_batches, total_issues, last_issue_key, queue_depth, last_heartbeat
+                    )
+                    VALUES ('DB-Consumer', 'DW-Consumer-Thread', 'IDLE', 0, 0, NULL, 0, CURRENT_TIMESTAMP)
+                    ON CONFLICT (worker_id) DO UPDATE SET
+                        status = 'IDLE', current_project = NULL, queue_depth = 0, last_heartbeat = CURRENT_TIMESTAMP;
+                """)
+                for w in range(1, 4):
+                    w_id = f"Worker-{w}"
+                    w_status = 'IDLE' if w <= active_workers else 'STANDBY'
+                    cur.execute("""
+                        INSERT INTO meta_etl_thread_monitor (
+                            worker_id, thread_name, status, total_batches, total_issues, last_issue_key, queue_depth, last_heartbeat
+                        )
+                        VALUES (%s, %s, %s, 0, 0, NULL, 0, CURRENT_TIMESTAMP)
+                        ON CONFLICT (worker_id) DO UPDATE SET
+                            status = %s, current_project = NULL, queue_depth = 0, last_heartbeat = CURRENT_TIMESTAMP;
+                    """, (w_id, f"Jira-Fetch_{w-1}", w_status, w_status))
         except Exception:
             pass
 

@@ -308,6 +308,26 @@ class JiraClient:
             else:
                 break
 
+    def get_approximate_issue_count(self, jql: str) -> int:
+        """
+        Consulta a la API moderna de Jira Cloud el conteo aproximado de issues
+        que cumplen con la condición JQL en < 200 ms.
+        POST /rest/api/3/search/approximate-count
+        """
+        try:
+            resp = self._request(
+                "POST",
+                "/rest/api/3/search/approximate-count",
+                json={"jql": jql},
+                raise_for_status=False
+            )
+            if resp.status_code == 200:
+                return int(resp.json().get("count", 0))
+            logger.warning(f"Error consultando conteo aproximado ({resp.status_code}): {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Excepción obteniendo conteo aproximado de Jira: {e}")
+        return 0
+
     def get_active_issue_ids_via_expression(self, project_key: str) -> List[int]:
         """
         Auditoría ultraligera: extrae hasta 10,000 IDs por request HTTP mediante Jira Expressions API.

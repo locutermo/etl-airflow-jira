@@ -39,6 +39,19 @@ def get_db_connection():
         options="-c timezone=America/Lima"
     )
 
+def format_time_ago(sec: int) -> str:
+    """Formatea segundos transcurridos de forma legible (s, min, h)."""
+    if sec < 60:
+        return f"hace {sec}s"
+    mins = sec // 60
+    if mins < 60:
+        return f"hace {mins} min"
+    hrs = mins // 60
+    rem_mins = mins % 60
+    if rem_mins > 0:
+        return f"hace {hrs} h {rem_mins} min"
+    return f"hace {hrs} h"
+
 @st.cache_data(ttl=15, show_spinner=False)
 def _run_query_cached(query: str, params: tuple = None) -> pd.DataFrame:
     try:
@@ -205,13 +218,20 @@ with tab_daily:
                         st.write(f"Estado: **{w_status}**")
                         st.write(f"Cola Buffer: **{q_depth} / 6 lotes**")
                         st.progress(min(1.0, max(0.0, q_depth / 6.0)))
-                        st.caption(f"Persistidos: **{w_issues:,}** tickets (hace {sec_ago}s)")
+                        st.caption(f"Persistidos: **{w_issues:,}** tickets ({format_time_ago(sec_ago)})")
                     else:
-                        status_badge = "[EXTRAYENDO]" if is_active else "[INACTIVO]"
-                        st.markdown(f"**{w_id}** `{status_badge}`")
-                        st.write(f"Proyecto: **{w_proj}**")
-                        st.write(f"Extraídos: **{w_issues:,}**")
-                        st.caption(f"Último: `{w_key}` (hace {sec_ago}s)")
+                        if w_status == "STANDBY":
+                            status_badge = "[STANDBY]"
+                            st.markdown(f"**{w_id}** `{status_badge}`")
+                            st.write("Estado: **STANDBY**")
+                            threshold = "Volumen <= 1,000" if w_id == "Worker-2" else "Volumen < 3,000"
+                            st.caption(f"En espera ({threshold})")
+                        else:
+                            status_badge = "[EXTRAYENDO]" if is_active else "[INACTIVO]"
+                            st.markdown(f"**{w_id}** `{status_badge}`")
+                            st.write(f"Proyecto: **{w_proj}**")
+                            st.write(f"Extraídos: **{w_issues:,}**")
+                            st.caption(f"Último: `{w_key}` ({format_time_ago(sec_ago)})")
         else:
             st.info("Sin telemetría de hilos activa. Los hilos se activarán automáticamente durante la ejecución de la extracción.")
 

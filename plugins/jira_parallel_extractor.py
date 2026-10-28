@@ -243,7 +243,8 @@ class MemorySafeParallelExtractor:
 
     def run(
         self,
-        project_configs: List[Dict[str, Any]]
+        project_configs: List[Dict[str, Any]],
+        active_workers: Optional[int] = None
     ) -> int:
         """
         Ejecuta la extracción paralela para la lista de proyectos provista.
@@ -251,6 +252,7 @@ class MemorySafeParallelExtractor:
           - 'project_key': str
           - 'since_date_str': str
           - 'fields': List[str]
+        active_workers: número de hilos productores a habilitar (escalado dinámico según volumen).
         """
         if not project_configs:
             logger.info("No hay proyectos para procesar en este ciclo.")
@@ -259,16 +261,22 @@ class MemorySafeParallelExtractor:
         self._total_processed = 0
         self._consumer_exception = None
         self._stop_event.clear()
-        DWRepository.reset_thread_monitor()
+
+        workers_to_use = min(
+            self.max_fetch_workers,
+            max(1, active_workers if active_workers is not None else self.max_fetch_workers)
+        )
+        logger.info(f"Extractor elástico: se habilitan {workers_to_use} worker(s) para este ciclo (máximo configurado: {self.max_fetch_workers}).")
+        DWRepository.reset_thread_monitor(active_workers=workers_to_use)
 
         # 1. Iniciar hilo consumidor
         consumer_thread = threading.Thread(target=self._consumer_writer, name="DW-Consumer-Thread", daemon=True)
         consumer_thread.start()
 
-        # 2. Iniciar pool de productores (máx 3 hilos concurrentes)
-        logger.info(f"Iniciando extracción paralela ({len(project_configs)} proyectos, máx {self.max_fetch_workers} workers).")
+        # 2. Iniciar pool de productores con los workers calculados
+        logger.info(f"Iniciando extracción paralela ({len(project_configs)} proyectos, {workers_to_use} workers activos).")
 
-        with ThreadPoolExecutor(max_workers=self.max_fetch_workers, thread_name_prefix="Jira-Fetch") as executor:
+        with ThreadPoolExecutor(max_workers=workers_to_use, thread_name_prefix="Jira-Fetch") as executor:
             futures = [
                 executor.submit(
                     self._producer_stream,

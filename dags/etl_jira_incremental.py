@@ -164,21 +164,56 @@ def task_extract_and_stage(**context):
             except Exception:
                 pass
 
-    # 4. Ejecución del extractor paralelo con backpressure
+    # 4. Determinar volumen aproximado y escalar workers elásticamente
     rules = DWRepository.get_homologation_rules()
     transformer = JiraTransformer(homologation_rules=rules)
     client = JiraClient()
 
+    # Consultar a la API de Jira el conteo aproximado de tickets a extraer agrupando por corte real
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for cfg in project_configs:
+        groups[cfg["since_date_str"]].append(f'"{cfg["project_key"]}"')
+
+    clauses = [f'(project in ({",".join(keys)}) AND updated >= "{wm}")' for wm, keys in groups.items()]
+    estimate_jql = " OR ".join(clauses)
+
+    try:
+        estimated_count = client.get_approximate_issue_count(estimate_jql)
+    except Exception as e:
+        logger.warning(f"No se pudo estimar conteo con JQL agrupado ({e}). Utilizando fallback...")
+        try:
+            min_watermark = min(cfg["since_date_str"] for cfg in project_configs)
+            keys_str = ','.join(f'"{k}"' for k in target_keys)
+            estimated_count = client.get_approximate_issue_count(f'project in ({keys_str}) AND updated >= "{min_watermark}"')
+        except Exception:
+            estimated_count = 3000
+
+    logger.info(f"Volumen estimado para extracción: ~{estimated_count} issues.")
+
+    # Regla de escala elástica:
+    # - Hasta 1,000 issues: 1 worker (ahorro de recursos ante poco volumen)
+    # - De 1,001 a 2,999 issues: 2 workers (partición en 2 hilos)
+    # - A partir de 3,000 issues: 3 workers (máximo disponible de productores)
+    if estimated_count <= 1000:
+        optimal_workers = 1
+    elif estimated_count < 3000:
+        optimal_workers = 2
+    else:
+        optimal_workers = 3
+
+    logger.info(f"Workers asignados dinámicamente: {optimal_workers} (basado en volumen de {estimated_count} issues).")
+
     extractor = MemorySafeParallelExtractor(
         jira_client=client,
         transformer=transformer,
-        max_fetch_workers=3,
+        max_fetch_workers=optimal_workers,
         queue_capacity=6,
         batch_size=100,
         checkpoint_callback=on_checkpoint
     )
 
-    total_processed = extractor.run(project_configs)
+    total_processed = extractor.run(project_configs, active_workers=optimal_workers)
 
     context['ti'].xcom_push(key='total_staged', value=total_processed)
     logger.info(f"Ciclo paralelo finalizado con éxito. Total issues procesados: {total_processed}")
