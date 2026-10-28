@@ -121,14 +121,21 @@ def task_extract_and_stage(**context):
         # Verificar si hay proyectos deshabilitados en dim_jira_project
         with get_dw_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = TRUE;")
-                enabled_keys = [row[0] for row in cur.fetchall()]
-                cur.execute("SELECT COUNT(*) FROM dim_jira_project;")
-                total_keys_count = cur.fetchone()[0]
-                if 0 < len(enabled_keys) < total_keys_count:
-                    proj_str = ", ".join([f'"{p}"' for p in enabled_keys])
-                    jql_parts.append(f"project IN ({proj_str})")
-                    logger.info(f"Sincronizando únicamente los {len(enabled_keys)} proyectos marcados como activos.")
+                cur.execute("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = FALSE;")
+                disabled_keys = [row[0] for row in cur.fetchall()]
+                cur.execute("SELECT COUNT(*) FROM dim_jira_project WHERE is_sync_enabled = TRUE;")
+                enabled_count = cur.fetchone()[0]
+                if disabled_keys and enabled_count > 0:
+                    if len(disabled_keys) <= enabled_count:
+                        dis_str = ", ".join([f'"{p}"' for p in disabled_keys])
+                        jql_parts.append(f"project NOT IN ({dis_str})")
+                        logger.info(f"Omitiendo {len(disabled_keys)} proyectos pausados en JQL: {disabled_keys}")
+                    else:
+                        cur.execute("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = TRUE;")
+                        enabled_keys = [row[0] for row in cur.fetchall()]
+                        en_str = ", ".join([f'"{p}"' for p in enabled_keys])
+                        jql_parts.append(f"project IN ({en_str})")
+                        logger.info(f"Sincronizando únicamente los {len(enabled_keys)} proyectos marcados como activos.")
 
     jql_parts.append(f'updated >= "{watermark_str}"')
     jql = " AND ".join(jql_parts) + " ORDER BY updated ASC"
@@ -138,7 +145,21 @@ def task_extract_and_stage(**context):
     transformer = JiraTransformer(homologation_rules=rules)
     total_staged = 0
 
-    for batch in client.search_issues_incremental(jql=jql, batch_size=100):
+    # Cache de proyectos pausados para filtrado defensivo en memoria
+    with get_dw_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = FALSE;")
+            disabled_set = set(row[0] for row in cur.fetchall())
+
+    for raw_batch in client.search_issues_incremental(jql=jql, batch_size=100):
+        # Filtrar issues pertenecientes a proyectos pausados por seguridad defensiva
+        batch = [
+            issue for issue in raw_batch 
+            if issue.get("fields", {}).get("project", {}).get("key") not in disabled_set
+        ]
+        if not batch:
+            continue
+
         # 1. Guardar en Staging (JSONB Crudo para Zero-API Backfill)
         DWRepository.upsert_raw_staging(batch)
 
