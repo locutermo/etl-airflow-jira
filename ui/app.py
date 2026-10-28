@@ -124,7 +124,13 @@ with tab_daily:
     last_sync_str = "Sin datos"
     if not df_watermark.empty:
         w_status = df_watermark.iloc[0]["status"]
-        if w_status != "SUCCESS":
+        if w_status == "SUCCESS":
+            status_str = "🟢 SALUDABLE"
+        elif w_status == "RUNNING":
+            status_str = "🟡 EN EJECUCIÓN"
+        elif w_status == "RESET":
+            status_str = "⚪ REINICIADO (LISTO)"
+        else:
             status_str = f"🔴 ERROR ({w_status})"
         last_dt = df_watermark.iloc[0]["last_successful_sync"]
         if last_dt is not None:
