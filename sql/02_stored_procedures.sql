@@ -447,77 +447,104 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
-CREATE OR REPLACE PROCEDURE sp_auto_generate_base_homologation(p_project_key VARCHAR(30))
+DROP PROCEDURE IF EXISTS sp_auto_generate_base_homologation(VARCHAR);
+DROP PROCEDURE IF EXISTS sp_auto_generate_base_homologation();
+
+CREATE OR REPLACE PROCEDURE sp_auto_generate_base_homologation(p_project_key VARCHAR(30) DEFAULT NULL)
 LANGUAGE plpgsql
 AS $$
 DECLARE
     v_inserted INT := 0;
     v_has_screen_fields BOOLEAN := FALSE;
 BEGIN
-    -- Verificar si el proyecto ya tiene campos de pantalla en meta_project_field_association
-    SELECT EXISTS (
-        SELECT 1 FROM meta_project_field_association 
-        WHERE project_key = p_project_key AND is_active = TRUE AND is_custom = TRUE
-    ) INTO v_has_screen_fields;
+    IF p_project_key IS NOT NULL THEN
+        -- Caso 1: Proyecto específico
+        SELECT EXISTS (
+            SELECT 1 FROM meta_project_field_association 
+            WHERE project_key = p_project_key AND is_active = TRUE AND is_custom = TRUE
+        ) INTO v_has_screen_fields;
 
-    IF v_has_screen_fields THEN
-        -- Prioridad 1: Solo campos reales de pantalla configurados en Jira (excluyendo paneles de mensaje)
+        IF v_has_screen_fields THEN
+            INSERT INTO meta_field_homologation (
+                project_key, request_type_name, field_id, canonical_name,
+                normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
+            )
+            SELECT 
+                p_project_key,
+                'ALL',
+                a.field_id,
+                fn_clean_canonical_name(COALESCE(c.field_name_jira, a.field_id)),
+                fn_infer_normalization_strategy(c.schema_type),
+                TRUE,
+                FALSE,
+                'screen_discovery'
+            FROM meta_project_field_association a
+            JOIN meta_jira_field_catalog c ON a.field_id = c.field_id
+            WHERE a.project_key = p_project_key 
+              AND a.is_active = TRUE 
+              AND a.is_custom = TRUE
+              AND c.field_name_jira NOT LIKE '%(Message)%'
+              AND c.field_name_jira NOT LIKE '%Message%'
+            ON CONFLICT (project_key, request_type_name, field_id) DO NOTHING;
+        ELSE
+            INSERT INTO meta_field_homologation (
+                project_key, request_type_name, field_id, canonical_name,
+                normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
+            )
+            SELECT 
+                p_project_key,
+                'ALL',
+                k.field_id,
+                fn_clean_canonical_name(COALESCE(c.field_name_jira, k.field_id)),
+                fn_infer_normalization_strategy(c.schema_type),
+                TRUE,
+                FALSE,
+                'raw_fallback'
+            FROM (
+                SELECT DISTINCT k.key AS field_id
+                FROM (
+                    SELECT raw_payload->'fields' AS fields 
+                    FROM stg_jira_issues_raw 
+                    WHERE project_key = p_project_key 
+                    LIMIT 500
+                ) s,
+                LATERAL jsonb_each(s.fields) k
+                WHERE k.key LIKE 'customfield_%'
+                  AND jsonb_typeof(k.value) != 'null'
+            ) k
+            JOIN meta_jira_field_catalog c ON k.field_id = c.field_id
+            WHERE c.field_name_jira NOT LIKE '%(Message)%'
+              AND c.field_name_jira NOT LIKE '%Message%'
+            ON CONFLICT (project_key, request_type_name, field_id) DO NOTHING;
+        END IF;
+    ELSE
+        -- Caso 2: Masivo para TODOS los proyectos activos
         INSERT INTO meta_field_homologation (
             project_key, request_type_name, field_id, canonical_name,
             normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
         )
         SELECT 
-            p_project_key,
+            a.project_key,
             'ALL',
             a.field_id,
             fn_clean_canonical_name(COALESCE(c.field_name_jira, a.field_id)),
             fn_infer_normalization_strategy(c.schema_type),
             TRUE,
             FALSE,
-            'screen_discovery'
+            'screen_discovery_bulk'
         FROM meta_project_field_association a
         JOIN meta_jira_field_catalog c ON a.field_id = c.field_id
-        WHERE a.project_key = p_project_key 
+        JOIN dim_jira_project p ON a.project_key = p.project_key
+        WHERE p.is_sync_enabled = TRUE
           AND a.is_active = TRUE 
           AND a.is_custom = TRUE
           AND c.field_name_jira NOT LIKE '%(Message)%'
           AND c.field_name_jira NOT LIKE '%Message%'
         ON CONFLICT (project_key, request_type_name, field_id) DO NOTHING;
-    ELSE
-        -- Prioridad 2: Fallback controlado solo si no hay datos de pantalla
-        INSERT INTO meta_field_homologation (
-            project_key, request_type_name, field_id, canonical_name,
-            normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
-        )
-        SELECT 
-            p_project_key,
-            'ALL',
-            k.field_id,
-            fn_clean_canonical_name(COALESCE(c.field_name_jira, k.field_id)),
-            fn_infer_normalization_strategy(c.schema_type),
-            TRUE,
-            FALSE,
-            'raw_fallback'
-        FROM (
-            SELECT DISTINCT k.key AS field_id
-            FROM (
-                SELECT raw_payload->'fields' AS fields 
-                FROM stg_jira_issues_raw 
-                WHERE project_key = p_project_key 
-                LIMIT 500
-            ) s,
-            LATERAL jsonb_each(s.fields) k
-            WHERE k.key LIKE 'customfield_%'
-              AND jsonb_typeof(k.value) != 'null'
-        ) k
-        JOIN meta_jira_field_catalog c ON k.field_id = c.field_id
-        WHERE c.field_name_jira NOT LIKE '%(Message)%'
-          AND c.field_name_jira NOT LIKE '%Message%'
-        ON CONFLICT (project_key, request_type_name, field_id) DO NOTHING;
     END IF;
 
     GET DIAGNOSTICS v_inserted = ROW_COUNT;
-    RAISE NOTICE 'Reglas base generadas para %: % nuevas reglas.', p_project_key, v_inserted;
+    RAISE NOTICE 'Reglas base generadas: % nuevas reglas.', v_inserted;
 END;
 $$;
 

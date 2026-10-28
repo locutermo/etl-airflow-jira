@@ -218,10 +218,21 @@ with tab_daily:
     st.markdown("---")
 
     # Tabla de Proyectos
-    col_t_title, col_t_btn = st.columns([4, 1])
+    col_t_title, col_t_btn_map, col_t_btn_ref = st.columns([2.8, 1.4, 0.8])
     with col_t_title:
         st.markdown("### Proyectos")
-    with col_t_btn:
+    with col_t_btn_map:
+        if st.button("Auto-Mapear Pantallas Masivo", help="Auto-homologa los campos de pantalla de todos los proyectos activos"):
+            with st.spinner("Auto-mapeando pantallas de todos los proyectos activos..."):
+                try:
+                    run_execute("CALL sp_auto_generate_base_homologation();")
+                    run_execute("CALL sp_refresh_project_sync_stats();")
+                    st.cache_data.clear()
+                    st.success("Mapeo de pantallas completado para todos los proyectos activos.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al auto-mapear: {e}")
+    with col_t_btn_ref:
         if st.button("Actualizar"):
             st.cache_data.clear()
             st.rerun()
@@ -234,18 +245,25 @@ with tab_daily:
 
     df_stats = run_query("""
         SELECT 
-            project_key AS "Código",
-            project_name AS "Nombre",
-            project_type AS "Tipo",
-            CASE WHEN is_sync_enabled THEN 'Activo' ELSE 'Pausado' END AS "Estado",
-            total_active_issues AS "Tickets",
-            total_deleted_issues AS "Eliminados",
-            mapped_custom_fields_count AS "Campos Mapeados",
-            COALESCE(to_char(last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI'), '-') AS "Última Actividad Jira",
-            COALESCE(to_char(last_etl_sync_at, 'YYYY-MM-DD HH24:MI'), 'Pendiente') AS "Última Sincronización",
-            is_sync_enabled
-        FROM meta_project_sync_stats
-        ORDER BY total_active_issues DESC;
+            s.project_key AS "Código",
+            s.project_name AS "Nombre",
+            s.project_type AS "Tipo",
+            CASE WHEN s.is_sync_enabled THEN 'Activo' ELSE 'Pausado' END AS "Estado",
+            s.total_active_issues AS "Tickets",
+            s.total_deleted_issues AS "Eliminados",
+            COALESCE(scr.screen_fields, 0) AS "Campos Pantalla",
+            s.mapped_custom_fields_count AS "Campos Homologados",
+            COALESCE(to_char(s.last_issue_updated_in_jira, 'YYYY-MM-DD HH24:MI'), '-') AS "Última Actividad Jira",
+            COALESCE(to_char(s.last_etl_sync_at, 'YYYY-MM-DD HH24:MI'), 'Pendiente') AS "Última Sincronización",
+            s.is_sync_enabled
+        FROM meta_project_sync_stats s
+        LEFT JOIN (
+            SELECT project_key, COUNT(DISTINCT field_id) AS screen_fields
+            FROM meta_project_field_association
+            WHERE is_active = TRUE
+            GROUP BY project_key
+        ) scr ON scr.project_key = s.project_key
+        ORDER BY s.total_active_issues DESC;
     """)
 
     if not df_stats.empty:
@@ -356,7 +374,7 @@ with tab_daily:
     df_projects = run_query("SELECT project_key, project_name FROM dim_jira_project ORDER BY project_key ASC;")
 
     if not df_projects.empty:
-        col_sel, col_act1, col_act2 = st.columns([2.5, 1.3, 1.2])
+        col_sel, col_act1, col_act2, col_act3 = st.columns([2.2, 1.2, 1.3, 1.1])
         with col_sel:
             selected_proj = st.selectbox(
                 "Proyecto a inspeccionar:",
@@ -365,16 +383,29 @@ with tab_daily:
             )
         with col_act1:
             st.write("")
-            if st.button(f"Auto-Mapear Pantallas", key=f"btn_auto_{selected_proj}", help=f"Genera reglas base únicamente para los campos de pantalla de {selected_proj} (excluyendo mensajes)"):
+            if st.button(f"Auto-Mapear {selected_proj}", key=f"btn_auto_{selected_proj}", help=f"Genera reglas base únicamente para los campos de pantalla de {selected_proj} (excluyendo mensajes)"):
                 with st.spinner(f"Detectando campos de pantalla para {selected_proj}..."):
                     try:
                         run_execute("CALL sp_auto_generate_base_homologation(%s);", (selected_proj,))
                         run_execute("CALL sp_refresh_project_sync_stats(%s);", (selected_proj,))
+                        st.cache_data.clear()
                         st.success(f"Campos de pantalla homologados para {selected_proj}.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error generando campos base para {selected_proj}: {e}")
         with col_act2:
+            st.write("")
+            if st.button("Auto-Mapear Todos", key="btn_auto_all_p_screen", help="Genera reglas base para los campos de pantalla de todos los proyectos activos"):
+                with st.spinner("Auto-mapeando pantallas de todos los proyectos activos..."):
+                    try:
+                        run_execute("CALL sp_auto_generate_base_homologation();")
+                        run_execute("CALL sp_refresh_project_sync_stats();")
+                        st.cache_data.clear()
+                        st.success("Mapeo completado para todos los proyectos activos.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        with col_act3:
             st.write("")
             if st.button(f"Sincronizar Jira", key=f"btn_sync_{selected_proj}", help=f"Dispara extracción incremental desde Jira Cloud para {selected_proj}"):
                 ok = trigger_airflow_dag("etl_jira_incremental_sync", conf={"project_keys": selected_proj, "max_records": 0})
@@ -542,94 +573,196 @@ with tab_daily:
 # PESTAÑA 2: HOMOLOGACIÓN DE CAMPOS
 # -----------------------------------------------------------------------------
 with tab_dict:
-    st.subheader("Mapeo de Campos Personalizados")
-    st.caption("Asocia campos de Jira al modelo analítico y procesa su histórico directamente desde los registros almacenados.")
+    st.subheader("Homologación de Campos Personalizados")
+    st.caption("Administra la asociación de campos de Jira al modelo analítico y la regularización del histórico.")
 
-    with st.expander("Generación y Regularización Base Masiva", expanded=False):
-        st.caption("Crea automáticamente las reglas base para los campos detectados en pantalla y regulariza los datos históricos almacenados.")
-        col_reg1, col_reg2 = st.columns([2, 2])
-        with col_reg1:
-            sel_proj_reg = st.selectbox("Espacio a regularizar:", df_projects["project_key"].tolist() if not df_projects.empty else [], key="sel_reg_proj")
-            if st.button(f"Regularizar campos de {sel_proj_reg}", key="btn_reg_single"):
-                with st.spinner(f"Procesando histórico de {sel_proj_reg}..."):
-                    try:
-                        run_execute("CALL sp_regularize_project_custom_fields(%s);", (sel_proj_reg,))
-                        st.success(f"Proyecto {sel_proj_reg} regularizado con éxito.")
+    # 1. Métricas resumidas en vivo
+    df_hom_metrics = run_query("""
+        SELECT 
+            (SELECT COUNT(*) FROM meta_field_homologation) AS total_rules,
+            (SELECT COUNT(DISTINCT project_key) FROM meta_field_homologation WHERE project_key != 'ALL') AS projects_with_rules,
+            (SELECT COUNT(*) FROM meta_project_field_association WHERE is_active = TRUE) AS screen_associations,
+            (SELECT COUNT(*) FROM meta_jira_field_catalog) AS catalog_fields;
+    """)
+    if not df_hom_metrics.empty:
+        hm1, hm2, hm3, hm4 = st.columns(4)
+        hm1.metric("Reglas Homologadas", f"{df_hom_metrics['total_rules'].iloc[0]:,}")
+        hm2.metric("Proyectos Configurados", f"{df_hom_metrics['projects_with_rules'].iloc[0]:,}")
+        hm3.metric("Campos en Pantallas Jira", f"{df_hom_metrics['screen_associations'].iloc[0]:,}")
+        hm4.metric("Catálogo Global Jira", f"{df_hom_metrics['catalog_fields'].iloc[0]:,}")
+
+    st.markdown("---")
+
+    # 2. Acciones Masivas
+    st.markdown("#### Acciones Masivas")
+    col_act_m1, col_act_m2 = st.columns([1, 1])
+    with col_act_m1:
+        st.markdown("**Auto-Mapear Pantallas (Todos los Activos)**")
+        st.caption("Genera reglas base automáticamente para los campos configurados en pantallas de Jira de todos los proyectos activos.")
+        if st.button("Auto-Mapear Todos los Activos", key="btn_bulk_auto_hom"):
+            with st.spinner("Ejecutando mapeo masivo de pantallas..."):
+                try:
+                    run_execute("CALL sp_auto_generate_base_homologation();")
+                    run_execute("CALL sp_refresh_project_sync_stats();")
+                    st.cache_data.clear()
+                    st.success("Reglas base generadas exitosamente para todos los proyectos activos.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al auto-mapear: {e}")
+    with col_act_m2:
+        st.markdown("**Regularizar Histórico (Todos los Activos)**")
+        st.caption("Procesa y regulariza secuencialmente los datos históricos almacenados en Staging para todos los proyectos activos.")
+        if st.button("Regularizar Histórico de Todos los Activos", key="btn_bulk_reg_all"):
+            with st.spinner("Procesando histórico de todos los proyectos activos..."):
+                try:
+                    df_act = run_query("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = TRUE ORDER BY project_key ASC;")
+                    for p_key in df_act["project_key"]:
+                        run_execute("CALL sp_regularize_project_custom_fields(%s);", (p_key,))
+                    st.cache_data.clear()
+                    st.success("Histórico regularizado exitosamente para todos los proyectos activos.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al regularizar: {e}")
+
+    st.markdown("---")
+
+    # 3. Sub-pestañas de Homologación
+    tab_hom_rules, tab_hom_manual = st.tabs([
+        "Reglas Activas por Proyecto",
+        "Mapeo Manual Individual (Avanzado)"
+    ])
+
+    with tab_hom_rules:
+        col_hr_f1, col_hr_f2 = st.columns([2, 2])
+        with col_hr_f1:
+            all_p_hom = ["Todos los Proyectos"] + (df_projects["project_key"].tolist() if not df_projects.empty else [])
+            sel_p_hom = st.selectbox("Filtrar por Proyecto:", all_p_hom, key="sel_filter_p_hom")
+        with col_hr_f2:
+            search_rule = st.text_input("Buscar campo o columna:", "", key="inp_search_rule").strip().lower()
+
+        query_rules = """
+            SELECT 
+                h.project_key AS "Proyecto",
+                h.field_id AS "ID Campo",
+                COALESCE(c.field_name_jira, h.field_id) AS "Nombre Jira",
+                'cf_' || h.canonical_name AS "Columna DW",
+                h.normalization_strategy AS "Estrategia",
+                CASE WHEN h.expose_in_datamart THEN 'SI' ELSE 'NO' END AS "En Datamart",
+                h.updated_by AS "Creado Por",
+                to_char(h.updated_at, 'YYYY-MM-DD HH24:MI') AS "Actualizado"
+            FROM meta_field_homologation h
+            LEFT JOIN meta_jira_field_catalog c ON h.field_id = c.field_id
+            WHERE 1=1
+        """
+        params_rules = []
+        if sel_p_hom != "Todos los Proyectos":
+            query_rules += " AND (h.project_key = %s OR h.project_key = 'ALL')"
+            params_rules.append(sel_p_hom)
+        query_rules += " ORDER BY h.project_key ASC, h.canonical_name ASC;"
+
+        df_active_rules = run_query(query_rules, tuple(params_rules) if params_rules else None)
+
+        if search_rule and not df_active_rules.empty:
+            df_active_rules = df_active_rules[
+                df_active_rules["Nombre Jira"].str.lower().str.contains(search_rule, na=False) |
+                df_active_rules["Columna DW"].str.lower().str.contains(search_rule, na=False) |
+                df_active_rules["ID Campo"].str.lower().str.contains(search_rule, na=False)
+            ]
+
+        st.caption(f"Mostrando **{len(df_active_rules):,}** reglas de homologación activas.")
+        st.dataframe(df_active_rules, use_container_width=True, hide_index=True)
+
+        if sel_p_hom != "Todos los Proyectos":
+            col_hp1, col_hp2, col_hp3 = st.columns(3)
+            with col_hp1:
+                if st.button(f"Auto-Mapear Pantallas de {sel_p_hom}", key=f"btn_hom_p_{sel_p_hom}"):
+                    with st.spinner(f"Auto-mapeando pantallas de {sel_p_hom}..."):
+                        run_execute("CALL sp_auto_generate_base_homologation(%s);", (sel_p_hom,))
+                        run_execute("CALL sp_refresh_project_sync_stats(%s);", (sel_p_hom,))
+                        st.cache_data.clear()
+                        st.success(f"Reglas generadas para {sel_p_hom}.")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-        with col_reg2:
-            st.markdown("**Regularizar Todos los Proyectos Activos**")
-            st.caption("Recorre todos los espacios activos de forma secuencial sin llamadas a Jira.")
-            if st.button("Regularizar todos los activos", key="btn_reg_all"):
-                with st.spinner("Procesando todos los proyectos activos secuencialmente..."):
-                    try:
-                        df_act = run_query("SELECT project_key FROM dim_jira_project WHERE is_sync_enabled = TRUE ORDER BY project_key ASC;")
-                        for p_key in df_act["project_key"]:
-                            run_execute("CALL sp_regularize_project_custom_fields(%s);", (p_key,))
-                        st.success("Todos los proyectos activos han sido regularizados exitosamente.")
+            with col_hp2:
+                if st.button(f"Regularizar Histórico de {sel_p_hom}", key=f"btn_reg_p_{sel_p_hom}"):
+                    with st.spinner(f"Regularizando histórico de {sel_p_hom}..."):
+                        run_execute("CALL sp_regularize_project_custom_fields(%s);", (sel_p_hom,))
+                        st.cache_data.clear()
+                        st.success(f"Histórico regularizado para {sel_p_hom}.")
                         st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
+            with col_hp3:
+                if st.button(f"Limpiar Reglas de {sel_p_hom}", key=f"btn_clean_rules_{sel_p_hom}"):
+                    run_execute("DELETE FROM meta_field_homologation WHERE project_key = %s;", (sel_p_hom,))
+                    run_execute("DELETE FROM fact_issue_custom_values WHERE project_key = %s;", (sel_p_hom,))
+                    run_execute("CALL sp_rebuild_project_datamart_view(%s);", (sel_p_hom,))
+                    run_execute("CALL sp_refresh_project_sync_stats(%s);", (sel_p_hom,))
+                    st.cache_data.clear()
+                    st.success(f"Reglas de {sel_p_hom} eliminadas.")
+                    st.rerun()
 
-    with st.form("form_backfill"):
-        col_f1, col_f2 = st.columns(2)
+    with tab_hom_manual:
+        st.markdown("#### Incorporación Manual de Campo (Uno a Uno)")
+        st.caption("Utiliza este formulario si necesitas definir una regla personalizada con una estrategia específica o nombre analítico particular.")
 
-        with col_f1:
-            all_projects = ["ALL"] + (df_projects["project_key"].tolist() if not df_projects.empty else [])
-            f_proj = st.selectbox("Proyecto:", all_projects, help="'ALL' aplica la regla a todos los proyectos")
+        with st.form("form_backfill"):
+            col_f1, col_f2 = st.columns(2)
 
-            df_catalog = run_query("SELECT field_id, field_name_jira, schema_type FROM meta_jira_field_catalog ORDER BY field_name_jira ASC;")
-            cat_options = [f"{row['field_id']} | {row['field_name_jira']} ({row['schema_type']})" for _, row in df_catalog.iterrows()] if not df_catalog.empty else ["customfield_10010 | Ejemplo"]
-            f_cat_sel = st.selectbox("Campo de Jira:", cat_options)
-            f_field_id = f_cat_sel.split(" | ")[0]
+            with col_f1:
+                all_projects = ["ALL"] + (df_projects["project_key"].tolist() if not df_projects.empty else [])
+                f_proj = st.selectbox("Proyecto:", all_projects, help="'ALL' aplica la regla a todos los proyectos")
 
-        with col_f2:
-            f_canonical = st.text_input("Nombre de columna (sin espacios, ej. centro_costo):", value="").strip().lower()
-            f_strategy = st.selectbox("Conversión:", [
-                "STRING",
-                "CASCADE_SPLIT",
-                "USER_DIM",
-                "NUMBER",
-                "DATE"
-            ])
+                df_catalog = run_query("SELECT field_id, field_name_jira, schema_type FROM meta_jira_field_catalog ORDER BY field_name_jira ASC;")
+                cat_options = [f"{row['field_id']} | {row['field_name_jira']} ({row['schema_type']})" for _, row in df_catalog.iterrows()] if not df_catalog.empty else ["customfield_10010 | Ejemplo"]
+                f_cat_sel = st.selectbox("Campo de Jira:", cat_options)
+                f_field_id = f_cat_sel.split(" | ")[0]
 
-        col_c1, col_c2 = st.columns(2)
-        with col_c1:
-            f_expose = st.checkbox("Incluir en vista SQL (vw_mart_*)", value=True)
-        with col_c2:
-            f_track = st.checkbox("Calcular tiempos en transiciones", value=False)
+            with col_f2:
+                f_canonical = st.text_input("Nombre de columna (sin espacios, ej. centro_costo):", value="").strip().lower()
+                f_strategy = st.selectbox("Conversión:", [
+                    "STRING",
+                    "CASCADE_SPLIT",
+                    "USER_DIM",
+                    "NUMBER",
+                    "DATE"
+                ])
 
-        submit_backfill = st.form_submit_button("Guardar y procesar histórico")
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                f_expose = st.checkbox("Incluir en vista SQL (vw_mart_*)", value=True)
+            with col_c2:
+                f_track = st.checkbox("Calcular tiempos en transiciones", value=False)
 
-    if submit_backfill:
-        if not f_canonical:
-            st.warning("Indica un nombre de columna válido.")
-        else:
-            try:
-                run_execute("""
-                    INSERT INTO meta_field_homologation (
-                        project_key, request_type_name, field_id, canonical_name,
-                        normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
-                    )
-                    VALUES (%s, 'ALL', %s, %s, %s, %s, %s, 'admin')
-                    ON CONFLICT (project_key, request_type_name, field_id) DO UPDATE SET
-                        canonical_name = EXCLUDED.canonical_name,
-                        normalization_strategy = EXCLUDED.normalization_strategy,
-                        expose_in_datamart = EXCLUDED.expose_in_datamart,
-                        track_in_transitions = EXCLUDED.track_in_transitions,
-                        updated_at = CURRENT_TIMESTAMP;
-                """, (f_proj, f_field_id, f_canonical, f_strategy, f_expose, f_track))
+            submit_backfill = st.form_submit_button("Guardar y procesar histórico")
 
-                with st.spinner("Procesando histórico..."):
-                    run_execute("CALL sp_backfill_custom_field_from_raw(%s, %s, %s, %s);", (f_proj, f_field_id, f_canonical, f_strategy))
+        if submit_backfill:
+            if not f_canonical:
+                st.warning("Indica un nombre de columna válido.")
+            else:
+                try:
+                    run_execute("""
+                        INSERT INTO meta_field_homologation (
+                            project_key, request_type_name, field_id, canonical_name,
+                            normalization_strategy, expose_in_datamart, track_in_transitions, updated_by
+                        )
+                        VALUES (%s, 'ALL', %s, %s, %s, %s, %s, 'admin')
+                        ON CONFLICT (project_key, request_type_name, field_id) DO UPDATE SET
+                            canonical_name = EXCLUDED.canonical_name,
+                            normalization_strategy = EXCLUDED.normalization_strategy,
+                            expose_in_datamart = EXCLUDED.expose_in_datamart,
+                            track_in_transitions = EXCLUDED.track_in_transitions,
+                            updated_at = CURRENT_TIMESTAMP;
+                    """, (f_proj, f_field_id, f_canonical, f_strategy, f_expose, f_track))
 
-                if f_proj != "ALL":
-                    run_execute("CALL sp_rebuild_project_datamart_view(%s);", (f_proj,))
+                    with st.spinner("Procesando histórico..."):
+                        run_execute("CALL sp_backfill_custom_field_from_raw(%s, %s, %s, %s);", (f_proj, f_field_id, f_canonical, f_strategy))
 
-                st.success(f"Campo '{f_canonical}' guardado y procesado para '{f_proj}'.")
-            except Exception as e:
-                st.error(f"Error al procesar: {e}")
+                    if f_proj != "ALL":
+                        run_execute("CALL sp_rebuild_project_datamart_view(%s);", (f_proj,))
+
+                    st.cache_data.clear()
+                    st.success(f"Campo '{f_canonical}' guardado y procesado para '{f_proj}'.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al procesar: {e}")
 
 # -----------------------------------------------------------------------------
 # PESTAÑA 3: MODELO DE DATOS (ER)

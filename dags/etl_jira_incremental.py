@@ -77,6 +77,13 @@ def task_sync_metadata(**context):
     with ThreadPoolExecutor(max_workers=5) as executor:
         list(executor.map(_sync_single_project, active_projects))
 
+    # Auto-homologar campos de pantalla y refrescar estadísticas de proyectos activos
+    logger.info("Auto-homologando campos de pantalla base para proyectos activos...")
+    with get_dw_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("CALL sp_auto_generate_base_homologation();")
+            cur.execute("CALL sp_refresh_project_sync_stats();")
+
 def task_extract_and_stage(**context):
     """
     Extracción Paralela por Proyecto (Project Sharding) y Payload Quirúrgico.
