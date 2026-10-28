@@ -15,7 +15,15 @@ from airflow.operators.python import PythonOperator
 from airflow.models.param import Param
 import pytz
 
-from jira_client import JiraClient, UNIVERSAL_BASE_FIELDS
+from jira_client import JiraClient
+
+# Lista quirúrgica de campos universales base
+UNIVERSAL_BASE_FIELDS = [
+    "summary", "description", "issuetype", "status", "priority",
+    "resolution", "resolutiondate", "created", "updated", "duedate",
+    "reporter", "assignee", "creator", "parent", "project",
+    "labels", "components", "timetracking", "timeoriginalestimate", "timespent"
+]
 from jira_transformer import JiraTransformer, parse_iso_datetime
 from jira_parallel_extractor import MemorySafeParallelExtractor
 from db import DWRepository, get_dw_connection, dw_cursor

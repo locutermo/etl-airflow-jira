@@ -201,3 +201,4 @@ class MemorySafeParallelExtractor:
 
         logger.info(f"Extracción paralela finalizada con éxito. Total tickets procesados en DW: {self._total_processed}.")
         return self._total_processed
+
