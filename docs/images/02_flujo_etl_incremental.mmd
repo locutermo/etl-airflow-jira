@@ -1,0 +1,19 @@
+sequenceDiagram
+    autonumber
+    participant Jira as Jira Cloud
+    participant Airflow as Orquestador Airflow
+    participant Staging as PostgreSQL (Staging)
+    participant Core as PostgreSQL (Core DW)
+    participant Datamart as Vistas Analiticas
+
+    Airflow->>Jira: 1. Consultar metadatos de proyectos y esquemas de pantallas
+    Jira-->>Airflow: Retorna catalogo global y campos activos en pantallas
+    Airflow->>Core: Actualizar asociaciones proyecto-campo y reglas base
+    Airflow->>Staging: 2. Consultar marcas de agua (Watermarks)
+    Airflow->>Jira: 3. Extraer tickets modificados (JQL incremental)
+    Jira-->>Airflow: Lotes de tickets con historial de cambios (Changelog)
+    Airflow->>Staging: Ingestar JSON crudo en stg_jira_issues_raw
+    Airflow->>Core: 4. Transformar datos universales hacia fact_jira_issues_core
+    Airflow->>Core: 5. Descomponer campos homologados hacia fact_issue_custom_values
+    Airflow->>Core: 6. Reconstruir historial y transiciones de estado
+    Airflow->>Datamart: 7. Refrescar vistas analiticas y estadisticas de sincronizacion

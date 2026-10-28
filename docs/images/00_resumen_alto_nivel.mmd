@@ -1,0 +1,6 @@
+flowchart LR
+    A["Jira Cloud API"] --> B["Orquestacion Airflow"]
+    B --> C["Data Warehouse PostgreSQL"]
+    C --> D["Microsoft Power BI"]
+    E["Portal Web de Gestion"] <--> C
+    E <--> B

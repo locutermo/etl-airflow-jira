@@ -12,12 +12,7 @@
 
 El proyecto implementa una plataforma centralizada de datos diseñada para desacoplar el análisis operativo y estratégico de la API de Atlassian Jira Cloud. La solución extrae periódicamente la actividad de los espacios de trabajo, estructura la información en un almacén analítico relacional y la expone mediante vistas optimizadas para el consumo en herramientas de Inteligencia de Negocios.
 
-```
-[ Jira Cloud API ] ---> [ Orquestación Airflow ] ---> [ Data Warehouse PostgreSQL ] ---> [ Microsoft Power BI ]
-                                                                  ^
-                                                                  |
-                                                      [ Portal Web de Gestión ]
-```
+![Flujo de Datos de Alto Nivel](docs/images/00_resumen_alto_nivel.png)
 
 ### Objetivos Estratégicos
 1. **Desacoplamiento y Rendimiento:** Reemplazar el consumo directo de APIs o consultas pesadas sobre el sistema transaccional mediante un repositorio analítico local en PostgreSQL 16 con cálculos precomputados de tiempos de ciclo (*Lead Time*, *Cycle Time*) y duraciones en estados.
@@ -34,43 +29,7 @@ La plataforma opera en una arquitectura por capas completamente contenerizada ba
 
 ### 2.1. Diagrama de Arquitectura por Capas
 
-```mermaid
-flowchart TD
-    subgraph Origen["1. Capa de Origen de Datos (Jira Cloud)"]
-        JIRA_REST["Jira REST API v3<br/>(Búsqueda JQL, Proyectos, Catálogo)"]
-        JIRA_EXP["Jira Expressions API<br/>(Conciliación Ligera de Identificadores)"]
-        JIRA_SCR["Jira Screen & Scheme API<br/>(Detección de Campos en Pantallas)"]
-    end
-
-    subgraph Orquestacion["2. Capa de Orquestación e Ingesta (Apache Airflow)"]
-        DAG_INC["Pipeline Incremental<br/>(Extracción Concurrente por Lotes)"]
-        DAG_DEL["Pipeline de Reconciliación<br/>(Detección de Tickets Eliminados)"]
-        DAG_REC["Pipeline de Mantenimiento<br/>(Regularización y Recálculo)"]
-        MONITOR["Monitor de Hilos y Telemetría"]
-    end
-
-    subgraph Almacenamiento["3. Capa de Almacenamiento (PostgreSQL 16 DW)"]
-        STG["Subcapa Staging (ELT)<br/>- Payloads JSONB Crudos<br/>- Control de Marcas de Agua"]
-        CORE["Subcapa Dimensional y Hechos<br/>- Tickets Core Universales<br/>- Extensiones JSM y SLAs<br/>- Historial de Transiciones<br/>- Valores Normalizados (EAV)"]
-        SEM["Subcapa Semántica y Datamarts<br/>- Catálogo de Metadatos y Pantallas<br/>- Reglas de Homologación<br/>- Vistas Analíticas Dinámicas (vw_mart_*)"]
-    end
-
-    subgraph Operacion["4. Capa de Administración y Operación"]
-        UI["Portal Web Operativo (Streamlit)<br/>Monitoreo, Homologación y Estadísticas"]
-        CADV["Telemetría de Recursos (cAdvisor)"]
-        TUNNEL["Túnel de Acceso Seguro (Ngrok)"]
-    end
-
-    subgraph Consumo["5. Capa de Consumo Analítico"]
-        PBI["Microsoft Power BI<br/>(Modelos Tabulares y Reportes de Gestión)"]
-    end
-
-    Origen --> Orquestacion
-    Orquestacion --> Almacenamiento
-    Operacion <--> Almacenamiento
-    Operacion <--> Orquestacion
-    Almacenamiento --> Consumo
-```
+![Diagrama de Arquitectura por Capas](docs/images/01_arquitectura_capas.png)
 
 ### 2.2. Descripción de Componentes
 
@@ -86,27 +45,7 @@ flowchart TD
 
 ### 3.1. Proceso de Sincronización Incremental
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Jira as Jira Cloud
-    participant Airflow as Orquestador Airflow
-    participant Staging as PostgreSQL (Staging)
-    participant Core as PostgreSQL (Core DW)
-    participant Datamart as Vistas Analíticas
-
-    Airflow->>Jira: 1. Consultar metadatos de proyectos y esquemas de pantallas
-    Jira-->>Airflow: Retorna catálogo global y campos activos en pantallas
-    Airflow->>Core: Actualizar asociaciones proyecto-campo y reglas base
-    Airflow->>Staging: 2. Consultar marcas de agua (Watermarks)
-    Airflow->>Jira: 3. Extraer tickets modificados (JQL incremental)
-    Jira-->>Airflow: Lotes de tickets con historial de cambios (Changelog)
-    Airflow->>Staging: Ingestar JSON crudo en stg_jira_issues_raw
-    Airflow->>Core: 4. Transformar datos universales hacia fact_jira_issues_core
-    Airflow->>Core: 5. Descomponer campos homologados hacia fact_issue_custom_values
-    Airflow->>Core: 6. Reconstruir historial y transiciones de estado
-    Airflow->>Datamart: 7. Refrescar vistas analíticas y estadísticas de sincronización
-```
+![Proceso de Sincronización Incremental](docs/images/02_flujo_etl_incremental.png)
 
 1. **Sincronización de Metadatos y Pantallas:** Se cataloga la totalidad de campos de la instancia y se mapean los esquemas de pantalla asignados a cada proyecto activo, descartando campos técnicos o decorativos irrelevantes.
 2. **Lectura de Marcas de Agua:** Se identifica la fecha y hora del último ticket sincronizado por proyecto para formular consultas JQL incrementales restringidas a registros modificados recientemente.
@@ -139,23 +78,7 @@ Cuando una unidad de negocio requiere incorporar un campo personalizado preexist
 
 El diseño del Data Warehouse sigue un enfoque dimensional estructurado para garantizar consistencia, integridad referencial y alta velocidad de consulta.
 
-```mermaid
-erDiagram
-    dim_jira_project ||--o{ fact_jira_issues_core : contiene
-    dim_jira_project ||--|| meta_project_sync_stats : reporta
-    dim_jira_project ||--o{ meta_project_field_association : configura
-    dim_jira_user ||--o{ fact_jira_issues_core : asignado
-    dim_jira_user ||--o{ fact_jira_issues_core : reportado
-    
-    fact_jira_issues_core ||--o| fact_jsm_requests : extiende_servicio
-    fact_jira_issues_core ||--o{ fact_issue_custom_values : posee_campos
-    fact_jira_issues_core ||--o{ fact_jira_changelog : audita_eventos
-    fact_jira_issues_core ||--o{ fact_issue_transitions : calcula_tiempos
-
-    meta_jira_field_catalog ||--o{ meta_field_homologation : define_reglas
-    meta_jira_field_catalog ||--o{ meta_project_field_association : cataloga
-    meta_field_homologation ||--o{ fact_issue_custom_values : tipifica
-```
+![Modelo Entidad-Relación Conceptual](docs/images/03_modelo_datos_er.png)
 
 ### 4.1. Principios de Integridad y Persistencia
 
@@ -187,10 +110,7 @@ erDiagram
 
 Dado que cada espacio de Jira puede configurar formularios y campos de manera independiente, el sistema aplica una estrategia automatizada de homologación:
 
-```
-[ Esquema de Pantalla en Jira ] ---> [ Detección Automática ] ---> [ Regla de Homologación ] ---> [ Columna en Datamart ]
-(ej. "Área Solicitante")              (excluye mensajes/core)       (cf_area_solicitante)           (vw_mart_<proyecto>)
-```
+![Estrategia de Homologación de Pantallas a Datamart](docs/images/04_estrategia_homologacion.png)
 
 ### 5.1. Criterios de Selección y Filtrado
 * **Detección por Pantallas:** El motor consulta la jerarquía de esquemas de pantalla asignados a los tipos de incidencia de cada proyecto. Únicamente los campos habilitados visualmente en Jira se consideran candidatos a homologación.

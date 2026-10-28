@@ -1,0 +1,15 @@
+erDiagram
+    dim_jira_project ||--o{ fact_jira_issues_core : contiene
+    dim_jira_project ||--|| meta_project_sync_stats : reporta
+    dim_jira_project ||--o{ meta_project_field_association : configura
+    dim_jira_user ||--o{ fact_jira_issues_core : asignado
+    dim_jira_user ||--o{ fact_jira_issues_core : reportado
+    
+    fact_jira_issues_core ||--o| fact_jsm_requests : extiende_servicio
+    fact_jira_issues_core ||--o{ fact_issue_custom_values : posee_campos
+    fact_jira_issues_core ||--o{ fact_jira_changelog : audita_eventos
+    fact_jira_issues_core ||--o{ fact_issue_transitions : calcula_tiempos
+
+    meta_jira_field_catalog ||--o{ meta_field_homologation : define_reglas
+    meta_jira_field_catalog ||--o{ meta_project_field_association : cataloga
+    meta_field_homologation ||--o{ fact_issue_custom_values : tipifica

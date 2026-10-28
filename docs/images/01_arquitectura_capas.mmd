@@ -1,0 +1,35 @@
+flowchart TD
+    subgraph Origen["1. Capa de Origen de Datos (Jira Cloud)"]
+        JIRA_REST["Jira REST API v3<br/>(Busqueda JQL, Proyectos, Catalogo)"]
+        JIRA_EXP["Jira Expressions API<br/>(Conciliacion Ligera de Identificadores)"]
+        JIRA_SCR["Jira Screen & Scheme API<br/>(Deteccion de Campos en Pantallas)"]
+    end
+
+    subgraph Orquestacion["2. Capa de Orquestacion e Ingesta (Apache Airflow)"]
+        DAG_INC["Pipeline Incremental<br/>(Extraccion Concurrente por Lotes)"]
+        DAG_DEL["Pipeline de Reconciliacion<br/>(Deteccion de Tickets Eliminados)"]
+        DAG_REC["Pipeline de Mantenimiento<br/>(Regularizacion y Recalculo)"]
+        MONITOR["Monitor de Hilos y Telemetria"]
+    end
+
+    subgraph Almacenamiento["3. Capa de Almacenamiento (PostgreSQL 16 DW)"]
+        STG["Subcapa Staging (ELT)<br/>- Payloads JSONB Crudos<br/>- Control de Marcas de Agua"]
+        CORE["Subcapa Dimensional y Hechos<br/>- Tickets Core Universales<br/>- Extensiones JSM y SLAs<br/>- Historial de Transiciones<br/>- Valores Normalizados (EAV)"]
+        SEM["Subcapa Semantica y Datamarts<br/>- Catalogo de Metadatos y Pantallas<br/>- Reglas de Homologacion<br/>- Vistas Analiticas Dinamicas (vw_mart_*)"]
+    end
+
+    subgraph Operacion["4. Capa de Administracion y Operacion"]
+        UI["Portal Web Operativo (Streamlit)<br/>Monitoreo, Homologacion y Estadisticas"]
+        CADV["Telemetria de Recursos (cAdvisor)"]
+        TUNNEL["Tunel de Acceso Seguro (Ngrok)"]
+    end
+
+    subgraph Consumo["5. Capa de Consumo Analitico"]
+        PBI["Microsoft Power BI<br/>(Modelos Tabulares y Reportes de Gestion)"]
+    end
+
+    Origen --> Orquestacion
+    Orquestacion --> Almacenamiento
+    Operacion <--> Almacenamiento
+    Operacion <--> Orquestacion
+    Almacenamiento --> Consumo
