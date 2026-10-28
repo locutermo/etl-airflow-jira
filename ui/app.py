@@ -159,7 +159,14 @@ with tab_daily:
     st.markdown("---")
 
     # 2. Tabla Interactiva de Espacios de Trabajo
-    st.markdown("### 🏢 Inventario y Estado por Espacio de Trabajo")
+    col_t_title, col_t_btn = st.columns([4, 1])
+    with col_t_title:
+        st.markdown("### 🏢 Inventario y Estado por Espacio de Trabajo")
+    with col_t_btn:
+        st.write("")
+        if st.button("🔄 Refrescar Espacios"):
+            st.rerun()
+
     df_stats = run_query("""
         SELECT 
             project_key AS "Prefijo (Key)",

@@ -136,6 +136,12 @@ def task_extract_and_stage(**context):
                 records_processed=total_staged,
                 status="RUNNING"
             )
+            # Refrescar estadísticas por espacio cada 2500 tickets para el portal UI
+            if total_staged % 2500 == 0:
+                try:
+                    DWRepository.refresh_project_sync_stats()
+                except Exception:
+                    pass
             logger.info(f"Checkpoint intermedio: {total_staged} tickets confirmados en DW. Watermark: {max_updated_at}")
         elif total_staged % 100 == 0:
             logger.info(f"Progreso: {total_staged} tickets extraídos. Último updated_at: {max_updated_at}")
