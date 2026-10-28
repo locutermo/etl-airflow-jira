@@ -470,119 +470,119 @@ with tab_model:
     with col_diag_ctrl:
         diag_height = st.slider("Altura del visor (px)", min_value=750, max_value=1600, value=1050, step=50)
 
-    mermaid_diagram = """
-    erDiagram
-        dim_jira_project ||--o{ fact_jira_issues_core : tiene
-        dim_jira_project ||--|| meta_project_sync_stats : metricas
-        dim_jira_user ||--o{ fact_jira_issues_core : asignado
-        
-        fact_jira_issues_core ||--o| fact_jsm_requests : extension_jsm
-        fact_jira_issues_core ||--o{ fact_issue_custom_values : valores_eav
-        fact_jira_issues_core ||--o{ fact_jira_changelog : historial
-        fact_jira_issues_core ||--o{ fact_issue_transitions : transiciones
+    raw_mermaid_code = """erDiagram
+    dim_jira_project ||--o{ fact_jira_issues_core : tiene
+    dim_jira_project ||--|| meta_project_sync_stats : metricas
+    dim_jira_user ||--o{ fact_jira_issues_core : asignado
+    
+    fact_jira_issues_core ||--o| fact_jsm_requests : extension_jsm
+    fact_jira_issues_core ||--o{ fact_issue_custom_values : valores_eav
+    fact_jira_issues_core ||--o{ fact_jira_changelog : historial
+    fact_jira_issues_core ||--o{ fact_issue_transitions : transiciones
 
-        meta_jira_field_catalog ||--o{ meta_field_homologation : catalogo
-        meta_jira_field_catalog ||--o{ fact_issue_custom_values : tipo_campo
-        
-        stg_jira_issues_raw ||--o{ fact_jira_issues_core : transforma
+    meta_jira_field_catalog ||--o{ meta_field_homologation : catalogo
+    meta_jira_field_catalog ||--o{ fact_issue_custom_values : tipo_campo
+    
+    stg_jira_issues_raw ||--o{ fact_jira_issues_core : transforma
 
-        dim_jira_project {
-            bigint project_id PK
-            varchar project_key UK
-            varchar project_name
-            varchar project_type
-            boolean is_sync_enabled
-        }
+    dim_jira_project {
+        bigint project_id PK
+        varchar project_key UK
+        varchar project_name
+        varchar project_type
+        boolean is_sync_enabled
+    }
 
-        dim_jira_user {
-            varchar account_id PK
-            varchar display_name
-            varchar email_address
-            boolean is_active
-            varchar account_type
-        }
+    dim_jira_user {
+        varchar account_id PK
+        varchar display_name
+        varchar email_address
+        boolean is_active
+        varchar account_type
+    }
 
-        fact_jira_issues_core {
-            bigint issue_id PK
-            varchar issue_key UK
-            bigint project_id FK
-            varchar summary
-            varchar issue_type_name
-            varchar status_name
-            varchar status_category
-            varchar reporter_account_id FK
-            varchar assignee_account_id FK
-            timestamp created_at
-            timestamp updated_at
-            timestamp resolved_at
-            bigint lead_time_seconds
-            boolean is_deleted
-        }
+    fact_jira_issues_core {
+        bigint issue_id PK
+        varchar issue_key UK
+        bigint project_id FK
+        varchar summary
+        varchar issue_type_name
+        varchar status_name
+        varchar status_category
+        varchar reporter_account_id FK
+        varchar assignee_account_id FK
+        timestamp created_at
+        timestamp updated_at
+        timestamp resolved_at
+        bigint lead_time_seconds
+        boolean is_deleted
+    }
 
-        fact_jsm_requests {
-            bigint issue_id PK "PK, FK"
-            varchar request_type_name
-            varchar organization_name
-            bigint sla_first_response_target_sec
-            bigint sla_resolution_target_sec
-            boolean sla_resolution_breached
-            int csat_rating
-        }
+    fact_jsm_requests {
+        bigint issue_id PK
+        varchar request_type_name
+        varchar organization_name
+        bigint sla_first_response_target_sec
+        bigint sla_resolution_target_sec
+        boolean sla_resolution_breached
+        int csat_rating
+    }
 
-        fact_issue_custom_values {
-            bigint issue_id PK "PK, FK"
-            varchar canonical_name PK
-            varchar field_id FK
-            text val_text
-            numeric val_number
-            timestamp val_timestamp
-            varchar val_account_id
-        }
+    fact_issue_custom_values {
+        bigint issue_id PK
+        varchar canonical_name PK
+        varchar field_id FK
+        text val_text
+        numeric val_number
+        timestamp val_timestamp
+        varchar val_account_id
+    }
 
-        fact_jira_changelog {
-            varchar changelog_item_key PK
-            bigint issue_id FK
-            varchar field_name
-            text from_string
-            text to_string
-            timestamp changed_at
-        }
+    fact_jira_changelog {
+        varchar changelog_item_key PK
+        bigint issue_id FK
+        varchar field_name
+        text from_string
+        text to_string
+        timestamp changed_at
+    }
 
-        fact_issue_transitions {
-            bigserial transition_id PK
-            bigint issue_id FK
-            varchar field_name
-            text field_value
-            timestamp start_at
-            timestamp end_at
-            bigint duration_seconds
-            boolean is_current_state
-        }
+    fact_issue_transitions {
+        bigserial transition_id PK
+        bigint issue_id FK
+        varchar field_name
+        text field_value
+        timestamp start_at
+        timestamp end_at
+        bigint duration_seconds
+        boolean is_current_state
+    }
 
-        meta_jira_field_catalog {
-            varchar field_id PK
-            varchar field_name_jira
-            varchar schema_type
-            boolean is_custom
-        }
+    meta_jira_field_catalog {
+        varchar field_id PK
+        varchar field_name_jira
+        varchar schema_type
+        boolean is_custom
+    }
 
-        meta_field_homologation {
-            serial homologation_id PK
-            varchar project_key
-            varchar field_id FK
-            varchar canonical_name
-            varchar normalization_strategy
-            boolean expose_in_datamart
-        }
+    meta_field_homologation {
+        serial homologation_id PK
+        varchar project_key
+        varchar field_id FK
+        varchar canonical_name
+        varchar normalization_strategy
+        boolean expose_in_datamart
+    }
 
-        stg_jira_issues_raw {
-            bigint issue_id PK
-            varchar project_key
-            varchar issue_key
-            timestamp updated_at
-            jsonb raw_payload
-        }
-    """
+    stg_jira_issues_raw {
+        bigint issue_id PK
+        varchar project_key
+        varchar issue_key
+        timestamp updated_at
+        jsonb raw_payload
+    }"""
+
+    json_mermaid_code = json.dumps(raw_mermaid_code.strip())
 
     mermaid_html = f"""
     <!DOCTYPE html>
@@ -626,41 +626,42 @@ with tab_model:
                 height: {diag_height - 65}px;
                 box-sizing: border-box;
             }}
-            .mermaid {{
+            #diagram-svg-target {{
                 display: inline-block;
                 transform-origin: top center;
                 transition: transform 0.15s ease-in-out;
             }}
-            .mermaid svg {{
+            #diagram-svg-target svg {{
                 max-width: none !important;
                 height: auto;
             }}
         </style>
         <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.0/dist/mermaid.min.js"></script>
         <script>
+            const mermaidCode = {json_mermaid_code};
             let currentZoom = 1.0;
+
             function zoom(delta) {{
                 currentZoom = Math.max(0.4, Math.min(2.5, currentZoom + delta));
-                const el = document.querySelector('.mermaid');
+                const el = document.getElementById('diagram-svg-target');
                 if (el) {{
                     el.style.transform = `scale(${{currentZoom}})`;
                 }}
             }}
+
             function resetZoom() {{
                 currentZoom = 1.0;
-                const el = document.querySelector('.mermaid');
+                const el = document.getElementById('diagram-svg-target');
                 if (el) {{
                     el.style.transform = 'scale(1)';
                 }}
             }}
-            document.addEventListener('DOMContentLoaded', function() {{
+
+            async function renderDiagram() {{
                 try {{
                     mermaid.initialize({{
-                        startOnLoad: true,
+                        startOnLoad: false,
                         theme: 'dark',
-                        er: {{
-                            useMaxWidth: false
-                        }},
                         themeVariables: {{
                             darkMode: true,
                             background: '#0e1117',
@@ -673,10 +674,27 @@ with tab_model:
                             fontSize: '13px'
                         }}
                     }});
-                }} catch (e) {{
-                    console.error('Error inicializando Mermaid:', e);
+
+                    const uniqueId = 'svg_er_' + Math.floor(Math.random() * 1000000);
+                    const {{ svg }} = await mermaid.render(uniqueId, mermaidCode);
+                    const target = document.getElementById('diagram-svg-target');
+                    if (target) {{
+                        target.innerHTML = svg;
+                    }}
+                }} catch (err) {{
+                    console.error('Error renderizando diagrama:', err);
+                    const target = document.getElementById('diagram-svg-target');
+                    if (target) {{
+                        target.innerHTML = '<div style="color:#f85149; text-align:left; padding:20px;"><pre>' + err.message + '</pre></div>';
+                    }}
                 }}
-            }});
+            }}
+
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', renderDiagram);
+            }} else {{
+                renderDiagram();
+            }}
         </script>
     </head>
     <body>
@@ -686,8 +704,8 @@ with tab_model:
             <button onclick="resetZoom()">⟲ Restablecer</button>
         </div>
         <div class="mermaid-wrapper">
-            <div class="mermaid">
-{mermaid_diagram}
+            <div id="diagram-svg-target">
+                <p style="color:#8b949e; margin-top:40px;">Cargando modelo de datos...</p>
             </div>
         </div>
     </body>
