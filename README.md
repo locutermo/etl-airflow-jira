@@ -189,3 +189,161 @@ Para verificar la continuidad operativa del servicio, el equipo de soporte debe 
 1. **Estado del Almacén:** Conectividad al puerto del Data Warehouse y estabilidad de volumen de registros en la vista general.
 2. **Monitoreo de Hilos:** Ausencia de hilos bloqueados en el panel de telemetría en tiempo real del portal web.
 3. **Marcas de Agua:** Que la diferencia de tiempo entre la última sincronización exitosa y la hora actual se mantenga dentro de la ventana de ejecución programada.
+
+---
+
+## 9. Manual de Operaciones y Despliegue (Runbook)
+
+Este manual técnico detalla los procedimientos de encendido, apagado, supervisión y puesta en marcha inicial de la plataforma, tanto en estaciones de trabajo locales (laptop de desarrollo/operación) como en servidores empresariales (Windows Server o Linux).
+
+### 9.1. Operación Cotidiana en Estación de Trabajo Local
+
+#### A. Verificación del Estado de la Plataforma
+Para comprobar si los servicios se encuentran en ejecución o detenidos, ejecute en la terminal dentro del directorio del proyecto:
+
+```bash
+docker compose ps
+```
+
+* **Estado [ACTIVO]:** Los contenedores muestran `Up` o `Up (healthy)`.
+* **Estado [DETENIDO]:** No figuran procesos o se listan con estado `Exited`.
+
+#### B. Procedimiento de Encendido (Arranque)
+Si la plataforma está apagada (por reinicio de la máquina, cierre de Docker Desktop o detención previa de contenedores):
+
+```bash
+# 1. Asegúrese de que la aplicación Docker Desktop se encuentre iniciada en el sistema.
+# 2. Inicie todos los microservicios en segundo plano:
+docker compose up -d
+```
+
+El parámetro `-d` (*detached*) asegura que los contenedores operen como servicios en segundo plano, liberando la consola.
+
+#### C. Procedimiento de Apagado Seguro
+Para suspender o apagar los servicios sin perder información:
+
+```bash
+# Opción 1: Pausar contenedores (mantiene el estado en memoria para un encendido instantáneo):
+docker compose stop
+
+# Opción 2: Detener y desmontar contenedores (los datos persisten intactos en los volúmenes de PostgreSQL):
+docker compose down
+```
+
+> **Nota de Persistencia:** Los datos analíticos (`jira_dw_vol`) y los metadatos de Airflow (`airflow_metadb_vol`) están alojados en volúmenes gestionados independientes de los contenedores. Ejecutar `docker compose down` o apagar el equipo no destruye la información almacenada.
+
+#### D. Reinicio de Servicios Específicos
+Si se modificó la configuración de un componente o se requiere reiniciar un servicio puntual:
+
+```bash
+# Reiniciar el orquestador Airflow Scheduler (por ejemplo, tras modificar plugins o DAGs):
+docker restart gobti-airflow-scheduler
+
+# Reiniciar el portal web de administración:
+docker restart gobti-jira-ui
+
+# Reiniciar todos los servicios de la plataforma:
+docker compose restart
+```
+
+---
+
+### 9.2. Despliegue Inicial en una Nueva Estación o Servidor
+
+Siga esta secuencia paso a paso para desplegar la plataforma desde cero en una nueva máquina (laptop o servidor Windows Server / Linux).
+
+#### Paso 1: Verificación de Requisitos Previos
+* **Sistema Operativo:** macOS (arm64 o x86_64), Linux (Ubuntu 20.04+, Debian 11+, RHEL 8+) o Windows Server 2019 / 2022 con Docker Desktop o WSL2.
+* **Recursos de Hardware:** Mínimo 4 GB de RAM (recomendado 8 GB de RAM) y 15 GB de almacenamiento libre en disco.
+* **Software Base Requerido:**
+  * Git instalado (`git --version`).
+  * Docker Engine / Docker Desktop instalado y en ejecución (`docker --version`).
+  * Docker Compose versión v2.20+ (`docker compose version`).
+
+#### Paso 2: Clonación del Repositorio
+```bash
+git clone <URL_DEL_REPOSITORIO> airflow-gobierno
+cd airflow-gobierno
+```
+
+#### Paso 3: Configuración de Variables de Entorno (`.env`)
+Genere el archivo de configuración a partir de la plantilla base:
+
+```bash
+cp .env.example .env
+```
+
+Edite el archivo `.env` e ingrese los valores correspondientes al entorno corporativo:
+* `JIRA_BASE_URL`: URL del dominio Jira Cloud (ej. `https://integratelperu.atlassian.net`).
+* `JIRA_USER_EMAIL`: Correo corporativo con permisos de lectura/administración en Jira.
+* `JIRA_API_TOKEN`: Token de API generado en Atlassian Account Settings.
+* `ATLASSIAN_ORG_ID`: Identificador de organización Atlassian Admin (opcional para enriquecimiento de correos).
+* `ATLASSIAN_ORG_TOKEN`: Token administrativo de organización.
+* `JIRA_ASSETS_WORKSPACE_ID`: Identificador de workspace de Jira Assets / CMDB.
+* `JIRA_ASSETS_CMDB_SCHEMA_ID`: Identificador numérico del esquema de CMDB (por defecto `8`).
+* `DW_USER` y `DW_PASSWORD`: Credenciales maestras del Data Warehouse PostgreSQL (`dw_admin`).
+* `AIRFLOW_UID`: En Linux/macOS establecer en `5000` o ejecutar `id -u` para evitar conflictos de permisos de archivos.
+
+#### Paso 4: Inicialización de la Base de Datos de Metadatos de Airflow
+Antes del primer levantamiento de servicios, es mandatorio crear e inicializar el esquema de Airflow:
+
+```bash
+docker compose up airflow-init
+```
+
+Espere hasta que la consola emita el mensaje de confirmación con código de salida 0:
+`gobti-airflow-init exited with code 0`
+
+#### Paso 5: Levantamiento Integral de la Infraestructura
+Inicie todos los contenedores en modo desacoplado:
+
+```bash
+docker compose up -d
+```
+
+#### Paso 6: Verificación de Salud de los Servicios
+Ejecute la verificación de contenedores:
+
+```bash
+docker compose ps
+```
+
+Verifique que los servicios esenciales figuren en estado activo:
+* `gobti-jira-dw`: `Up (healthy)` en puerto host `5433->5432`.
+* `gobti-airflow-scheduler`: `Up`.
+* `gobti-airflow-webserver`: `Up` en puerto host `8080->8080`.
+* `gobti-jira-ui`: `Up (healthy)` en puerto host `8501->8501`.
+
+#### Paso 7: Carga Inicial de Datos (Secuencia Operativa de Arranque)
+1. **Acceso al Portal Web:** Abra en el navegador `http://localhost:8501`.
+2. **Auto-Mapeo de Proyectos:** En la sección "Homologación de Campos", pulse el botón **Auto-Mapear Pantallas** para registrar las reglas de extracción analítica de los espacios de trabajo detectados.
+3. **Carga Inicial de la CMDB:** En la consola de Airflow (`http://localhost:8080`), active y dispare manualmente el DAG `etl_jira_assets_cmdb` para sincronizar el catálogo de 19,000+ activos corporativos.
+4. **Activación de la Sincronización Incremental:** Active el interruptor del DAG `etl_jira_incremental_sync`. A partir de este momento, el sistema ejecutará la extracción automática cada 15 minutos de forma ininterrumpida.
+
+---
+
+### 9.3. Matriz de Puertos y Puntos de Enlace
+
+| Servicio | Enlace de Acceso Local | Credenciales por Defecto |
+| :--- | :--- | :--- |
+| **Portal de Gobierno y Soporte** | `http://localhost:8501` | Acceso directo local. |
+| **Consola Orquestador Airflow** | `http://localhost:8080` | Usuario: `admin` \| Clave: según `.env` |
+| **PostgreSQL Data Warehouse** | `localhost:5433` (BD: `jira_dw`) | Usuario: `dw_admin` \| Clave: según `.env` |
+| **Métricas de Recursos cAdvisor** | `http://localhost:8085` | Acceso directo local. |
+
+---
+
+### 9.4. Comandos de Referencia Rápida (Cheatsheet)
+
+| Operación | Comando Terminal |
+| :--- | :--- |
+| **Iniciar la plataforma** | `docker compose up -d` |
+| **Detener la plataforma** | `docker compose down` |
+| **Pausar temporalmente** | `docker compose stop` |
+| **Reanudar tras pausa** | `docker compose start` |
+| **Ver estado de salud** | `docker ps --filter "name=gobti"` |
+| **Ver logs del planificador Airflow** | `docker logs -f --tail 50 gobti-airflow-scheduler` |
+| **Ver logs de la base de datos DW** | `docker logs -f --tail 50 gobti-jira-dw` |
+| **Reiniciar un contenedor específico** | `docker restart <nombre_del_contenedor>` |
+| **Acceso shell al Data Warehouse** | `docker exec -it gobti-jira-dw psql -U dw_admin -d jira_dw` |
+

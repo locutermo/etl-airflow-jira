@@ -282,8 +282,8 @@ def task_calculate_intervals_and_stats(**context):
 with DAG(
     'etl_jira_incremental_sync',
     default_args=default_args,
-    description='Sincronización incremental paralela y quirúrgica de Jira Cloud a PostgreSQL DW',
-    schedule_interval='0 * * * *',
+    description='Sincronización incremental cada 15 minutos de Jira Cloud a PostgreSQL DW',
+    schedule_interval='*/15 * * * *',
     start_date=datetime(2026, 1, 1, tzinfo=LIMA_TZ),
     catchup=False,
     max_active_runs=1,

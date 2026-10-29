@@ -331,7 +331,13 @@ BEGIN
             jsm.request_type_name,
             jsm.organization_name,
             jsm.sla_first_response_breached,
-            jsm.sla_resolution_breached
+            jsm.sla_resolution_breached,
+            COALESCE(
+                MAX(CASE WHEN eav.canonical_name = ''cf_aplicaciones_impactadas'' THEN eav.val_text END),
+                MAX(CASE WHEN eav.canonical_name = ''cf_aplicacion_1'' THEN eav.val_text END),
+                MAX(CASE WHEN eav.canonical_name = ''cf_aplicaciones'' THEN eav.val_text END),
+                MAX(CASE WHEN eav.canonical_name = ''cf_aplicacion'' THEN eav.val_text END)
+            ) AS aplicacion_consolidada
             %s
         FROM fact_jira_issues_core c
         LEFT JOIN dim_jira_user ur ON c.reporter_account_id = ur.account_id
