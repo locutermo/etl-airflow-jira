@@ -185,11 +185,11 @@ def task_extract_and_stage(**context):
 
     # Regla de escala elástica:
     # - Hasta 1,000 issues: 1 worker (ahorro de recursos ante poco volumen)
-    # - De 1,001 a 2,999 issues: 2 workers (partición en 2 hilos)
-    # - A partir de 3,000 issues: 3 workers (máximo disponible de productores)
+    # - De 1,001 a 2,000 issues: 2 workers (partición en 2 hilos)
+    # - A partir de 2,001 issues: 3 workers (partición en 3 hilos concurrentes)
     if estimated_count <= 1000:
         optimal_workers = 1
-    elif estimated_count < 3000:
+    elif estimated_count <= 2000:
         optimal_workers = 2
     else:
         optimal_workers = 3

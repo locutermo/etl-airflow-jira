@@ -224,7 +224,7 @@ with tab_daily:
                             status_badge = "[STANDBY]"
                             st.markdown(f"**{w_id}** `{status_badge}`")
                             st.write("Estado: **STANDBY**")
-                            threshold = "Volumen <= 1,000" if w_id == "Worker-2" else "Volumen < 3,000"
+                            threshold = "Volumen <= 1,000" if w_id == "Worker-2" else "Volumen <= 2,000"
                             st.caption(f"En espera ({threshold})")
                         else:
                             status_badge = "[EXTRAYENDO]" if is_active else "[INACTIVO]"

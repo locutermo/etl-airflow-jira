@@ -47,6 +47,8 @@ class MemorySafeParallelExtractor:
         self._queue: queue.Queue = queue.Queue(maxsize=self.queue_capacity)
         self._total_processed = 0
         self._processed_lock = threading.Lock()
+        self._worker_cumulative_stats: Dict[str, Dict[str, int]] = {}
+        self._worker_stats_lock = threading.Lock()
         self._consumer_exception: Optional[Exception] = None
         self._stop_event = threading.Event()
 
@@ -76,13 +78,19 @@ class MemorySafeParallelExtractor:
         jql = f'project = "{project_key}" AND updated >= "{since_date_str}" ORDER BY updated ASC'
         logger.info(f"[{worker_id} / {project_key}] Iniciando extracción (JQL: {jql}, {len(fields)} campos quirúrgicos).")
 
+        with self._worker_stats_lock:
+            if worker_id not in self._worker_cumulative_stats:
+                self._worker_cumulative_stats[worker_id] = {"issues": 0, "batches": 0}
+            cur_worker_issues = self._worker_cumulative_stats[worker_id]["issues"]
+            cur_worker_batches = self._worker_cumulative_stats[worker_id]["batches"]
+
         DWRepository.update_thread_status(
             worker_id=worker_id,
             thread_name=t_name,
             current_project=project_key,
             status="EXTRACTING",
-            total_batches=0,
-            total_issues=0,
+            total_batches=cur_worker_batches,
+            total_issues=cur_worker_issues,
             last_issue_key=None,
             queue_depth=self._queue.qsize()
         )
@@ -108,14 +116,20 @@ class MemorySafeParallelExtractor:
                 proj_batches += 1
                 last_key = raw_batch[-1].get("key") or last_key
 
-                # Actualizar estado de progreso del hilo
+                with self._worker_stats_lock:
+                    self._worker_cumulative_stats[worker_id]["issues"] += batch_len
+                    self._worker_cumulative_stats[worker_id]["batches"] += 1
+                    cur_worker_issues = self._worker_cumulative_stats[worker_id]["issues"]
+                    cur_worker_batches = self._worker_cumulative_stats[worker_id]["batches"]
+
+                # Actualizar estado de progreso del hilo con acumulado del ciclo
                 DWRepository.update_thread_status(
                     worker_id=worker_id,
                     thread_name=t_name,
                     current_project=project_key,
                     status="EXTRACTING",
-                    total_batches=proj_batches,
-                    total_issues=proj_count,
+                    total_batches=cur_worker_batches,
+                    total_issues=cur_worker_issues,
                     last_issue_key=last_key,
                     queue_depth=self._queue.qsize()
                 )
@@ -124,25 +138,33 @@ class MemorySafeParallelExtractor:
                 self._queue.put((project_key, raw_batch), block=True)
 
             logger.info(f"[{worker_id} / {project_key}] Finalizado con éxito. Total issues: {proj_count}.")
+            with self._worker_stats_lock:
+                cur_worker_issues = self._worker_cumulative_stats[worker_id]["issues"]
+                cur_worker_batches = self._worker_cumulative_stats[worker_id]["batches"]
+
             DWRepository.update_thread_status(
                 worker_id=worker_id,
                 thread_name=t_name,
                 current_project=None,
                 status="IDLE",
-                total_batches=proj_batches,
-                total_issues=proj_count,
+                total_batches=cur_worker_batches,
+                total_issues=cur_worker_issues,
                 last_issue_key=last_key,
                 queue_depth=self._queue.qsize()
             )
         except Exception as e:
             logger.error(f"[{worker_id} / {project_key}] Error durante la extracción: {e}", exc_info=True)
+            with self._worker_stats_lock:
+                cur_worker_issues = self._worker_cumulative_stats.get(worker_id, {}).get("issues", 0)
+                cur_worker_batches = self._worker_cumulative_stats.get(worker_id, {}).get("batches", 0)
+
             DWRepository.update_thread_status(
                 worker_id=worker_id,
                 thread_name=t_name,
                 current_project=project_key,
                 status="ERROR",
-                total_batches=proj_batches,
-                total_issues=proj_count,
+                total_batches=cur_worker_batches,
+                total_issues=cur_worker_issues,
                 last_issue_key=last_key,
                 queue_depth=self._queue.qsize()
             )
@@ -261,6 +283,10 @@ class MemorySafeParallelExtractor:
         self._total_processed = 0
         self._consumer_exception = None
         self._stop_event.clear()
+        with self._worker_stats_lock:
+            self._worker_cumulative_stats = {
+                f"Worker-{i}": {"issues": 0, "batches": 0} for i in range(1, 4)
+            }
 
         workers_to_use = min(
             self.max_fetch_workers,
