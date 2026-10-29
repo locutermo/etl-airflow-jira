@@ -4,11 +4,34 @@ Utiliza psycopg2 con execute_values y execute_batch para rendimiento óptimo en 
 """
 
 import os
+import json
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from typing import List, Dict, Any, Optional
+import pytz
 import psycopg2
 from psycopg2.extras import execute_values, Json
+
+LIMA_TZ = pytz.timezone("America/Lima")
+
+def parse_iso_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    try:
+        clean_str = dt_str.replace("Z", "+00:00")
+        if len(clean_str) > 23 and (clean_str[-5] in ('+', '-')) and clean_str[-3] != ':':
+            clean_str = clean_str[:-2] + ':' + clean_str[-2:]
+        dt = datetime.fromisoformat(clean_str)
+        if dt.tzinfo is None:
+            return LIMA_TZ.localize(dt)
+        return dt.astimezone(LIMA_TZ)
+    except Exception:
+        try:
+            dt = datetime.strptime(dt_str[:19], "%Y-%m-%dT%H:%M:%S")
+            return LIMA_TZ.localize(dt)
+        except Exception:
+            return None
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +249,8 @@ class DWRepository:
     def get_fields_for_project_extraction(project_key: str, universal_fields: List[str]) -> List[str]:
         """
         Retorna la unión deduplicada de universal_fields + los custom fields activos
-        asociados a las pantallas del proyecto en meta_project_field_association.
+        asociados a las pantallas del proyecto en meta_project_field_association
+        + campos del sistema requeridos para Jira Service Management (Request Type, Organizations, SLAs).
         """
         with dw_cursor() as cur:
             cur.execute("""
@@ -236,7 +260,16 @@ class DWRepository:
             """, (project_key,))
             custom_ids = [row[0] for row in cur.fetchall()]
 
-        combined = list(dict.fromkeys(universal_fields + custom_ids))
+            # Asegurar campos del sistema para Jira Service Management (Request Type, Organizations, SLAs)
+            cur.execute("""
+                SELECT field_id 
+                FROM meta_jira_field_catalog 
+                WHERE schema_type IN ('sd-customerrequesttype', 'sd-servicelevelagreement')
+                   OR schema_custom ILIKE '%com.atlassian.servicedesk%';
+            """)
+            jsm_system_fields = [row[0] for row in cur.fetchall()]
+
+        combined = list(dict.fromkeys(universal_fields + custom_ids + jsm_system_fields))
         return combined
 
     @staticmethod
@@ -575,5 +608,154 @@ class DWRepository:
             """)
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    # =========================================================================
+    # JIRA ASSETS / INSIGHT CMDB (OPERACIONES BATCH)
+    # =========================================================================
+    @staticmethod
+    def upsert_users_from_organization(org_users: List[Dict[str, Any]]) -> int:
+        """Actualiza masivamente los correos de dim_jira_user desde el directorio Atlassian Admin Org API."""
+        if not org_users:
+            return 0
+        tuples = []
+        for u in org_users:
+            acc_id = u.get("account_id")
+            email = u.get("email")
+            name = u.get("name")
+            active = u.get("status") == "active"
+            acc_type = u.get("account_type", "atlassian")
+            if acc_id and email:
+                tuples.append((acc_id, name, email, active, acc_type))
+
+        if not tuples:
+            return 0
+
+        with dw_cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO dim_jira_user (account_id, display_name, email_address, is_active, account_type)
+                VALUES %s
+                ON CONFLICT (account_id) DO UPDATE SET
+                    email_address = EXCLUDED.email_address,
+                    display_name = COALESCE(dim_jira_user.display_name, EXCLUDED.display_name),
+                    last_synced_at = CURRENT_TIMESTAMP;
+            """, tuples)
+        logger.info(f"Directorio de identidades sincronizado: {len(tuples)} correos corporativos actualizados en dim_jira_user.")
+        return len(tuples)
+
+    @staticmethod
+    def upsert_cmdb_schemas(schemas: List[Dict[str, Any]]):
+        if not schemas:
+            return
+        tuples = []
+        for s in schemas:
+            tuples.append((
+                int(s["id"]),
+                s.get("objectSchemaKey", ""),
+                s.get("displayName") or s.get("name", ""),
+                s.get("description"),
+                int(s.get("objectCount", 0)),
+                int(s.get("objectTypeCount", 0))
+            ))
+        with dw_cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO dim_cmdb_schema (
+                    schema_id, schema_key, schema_name, description, object_count, object_type_count
+                )
+                VALUES %s
+                ON CONFLICT (schema_id) DO UPDATE SET
+                    schema_key = EXCLUDED.schema_key,
+                    schema_name = EXCLUDED.schema_name,
+                    description = EXCLUDED.description,
+                    object_count = EXCLUDED.object_count,
+                    object_type_count = EXCLUDED.object_type_count,
+                    last_synced_at = CURRENT_TIMESTAMP;
+            """, tuples)
+
+    @staticmethod
+    def upsert_cmdb_object_types(types: List[Dict[str, Any]], schema_id: int):
+        if not types:
+            return
+        tuples = []
+        for t in types:
+            parent_id = int(t["parentObjectTypeId"]) if t.get("parentObjectTypeId") and str(t["parentObjectTypeId"]).isdigit() else None
+            tuples.append((
+                int(t["id"]),
+                schema_id,
+                t.get("name") or t.get("displayName", ""),
+                parent_id
+            ))
+        with dw_cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO dim_cmdb_object_type (
+                    object_type_id, schema_id, type_name, parent_type_id
+                )
+                VALUES %s
+                ON CONFLICT (object_type_id) DO UPDATE SET
+                    type_name = EXCLUDED.type_name,
+                    parent_type_id = EXCLUDED.parent_type_id,
+                    last_synced_at = CURRENT_TIMESTAMP;
+            """, tuples)
+
+    @staticmethod
+    def upsert_cmdb_objects(objects: List[Dict[str, Any]], workspace_id: str, schema_id: int):
+        if not objects:
+            return
+        tuples = []
+        for obj in objects:
+            obj_id = int(obj["id"])
+            obj_key = obj.get("objectKey", "")
+            ot_info = obj.get("objectType", {})
+            ot_id = int(ot_info["id"]) if ot_info.get("id") and str(ot_info["id"]).isdigit() else None
+            ot_name = ot_info.get("name")
+
+            # Desglosar atributos
+            attrs = {}
+            for attr in obj.get("attributes", []):
+                aname = attr.get("objectTypeAttribute", {}).get("name")
+                vals = [v.get("displayValue") or v.get("value") for v in attr.get("objectAttributeValues", [])]
+                if aname:
+                    attrs[aname] = vals[0] if len(vals) == 1 else (vals if vals else None)
+
+            label = obj.get("label")
+            if not label or label == "-":
+                label = attrs.get("Name") or attrs.get("Nombre") or obj_key
+            status = attrs.get("Status") or attrs.get("Estado")
+
+            created_at = parse_iso_datetime(obj.get("created"))
+            updated_at = parse_iso_datetime(obj.get("updated"))
+
+            tuples.append((
+                obj_id,
+                obj_key,
+                workspace_id,
+                schema_id,
+                ot_id,
+                ot_name,
+                str(label)[:255],
+                str(status)[:80] if status else None,
+                json.dumps(attrs),
+                created_at,
+                updated_at
+            ))
+
+        with dw_cursor() as cur:
+            execute_values(cur, """
+                INSERT INTO dim_cmdb_object (
+                    object_id, object_key, workspace_id, schema_id, object_type_id,
+                    object_type_name, label, status, attributes_json, created_at, updated_at
+                )
+                VALUES %s
+                ON CONFLICT (object_id) DO UPDATE SET
+                    object_key = EXCLUDED.object_key,
+                    object_type_id = EXCLUDED.object_type_id,
+                    object_type_name = EXCLUDED.object_type_name,
+                    label = EXCLUDED.label,
+                    status = EXCLUDED.status,
+                    attributes_json = EXCLUDED.attributes_json,
+                    created_at = EXCLUDED.created_at,
+                    updated_at = EXCLUDED.updated_at,
+                    last_synced_at = CURRENT_TIMESTAMP;
+            """, tuples)
+
 
 

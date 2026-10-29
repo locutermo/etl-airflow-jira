@@ -321,7 +321,7 @@ BEGIN
             c.priority_name,
             c.resolution_name,
             ur.display_name AS reporter_name,
-            ur.email_address AS reporter_email,
+            COALESCE(ur.email_address, MAX(CASE WHEN eav.canonical_name = ''cf_correo'' THEN eav.val_text END)) AS reporter_email,
             ua.display_name AS assignee_name,
             ua.email_address AS assignee_email,
             c.created_at,
@@ -584,9 +584,22 @@ BEGIN
                 WHEN h.normalization_strategy = 'NUMBER' THEN f.val #>> '{}'
                 WHEN h.normalization_strategy = 'DATE' THEN f.val #>> '{}'
                 WHEN h.normalization_strategy = 'USER_DIM' THEN COALESCE(f.val->>'displayName', f.val->>'name', f.val->>'value')
-                WHEN jsonb_typeof(f.val) = 'object' THEN COALESCE(f.val->>'value', f.val->>'name')
+                WHEN jsonb_typeof(f.val) = 'object' THEN COALESCE(
+                    (CASE WHEN (f.val->>'objectId') ~ '^[0-9]+$' THEN (SELECT obj.label FROM dim_cmdb_object obj WHERE obj.object_id = (f.val->>'objectId')::BIGINT) ELSE NULL END),
+                    f.val->>'objectId',
+                    f.val->>'value', 
+                    f.val->>'name'
+                )
                 WHEN jsonb_typeof(f.val) = 'array' THEN (
-                    SELECT string_agg(COALESCE(elem->>'value', elem->>'name', elem::text), ', ')
+                    SELECT string_agg(
+                        COALESCE(
+                            (CASE WHEN (elem->>'objectId') ~ '^[0-9]+$' THEN (SELECT obj.label FROM dim_cmdb_object obj WHERE obj.object_id = (elem->>'objectId')::BIGINT) ELSE NULL END),
+                            elem->>'objectId',
+                            elem->>'value', 
+                            elem->>'name', 
+                            elem::text
+                        ), ', '
+                    )
                     FROM jsonb_array_elements(f.val) elem
                 )
                 ELSE f.val #>> '{}'

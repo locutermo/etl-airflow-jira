@@ -240,6 +240,37 @@ class JiraTransformer:
                     "csat_comment": None
                 }
                 break
+            elif f_id == "customfield_10010" and "name" in f_val:
+                jsm_record = {
+                    "issue_id": issue_id,
+                    "project_key": project_key,
+                    "service_desk_id": str(f_val.get("serviceDeskId", "")),
+                    "request_type_id": str(f_val.get("id", "")),
+                    "request_type_name": f_val.get("name"),
+                    "request_type_group": f_val.get("groupName"),
+                    "organization_id": None,
+                    "organization_name": None,
+                    "sla_first_response_target_sec": None,
+                    "sla_first_response_elapsed_sec": None,
+                    "sla_first_response_breached": None,
+                    "sla_resolution_target_sec": None,
+                    "sla_resolution_elapsed_sec": None,
+                    "sla_resolution_breached": None,
+                    "csat_rating": None,
+                    "csat_comment": None
+                }
+                break
+
+        # Extracción de Organizaciones JSM
+        if jsm_record:
+            orgs = fields.get("customfield_10002")
+            if isinstance(orgs, list) and orgs:
+                org_names = [o.get("name") for o in orgs if isinstance(o, dict) and o.get("name")]
+                org_ids = [str(o.get("id")) for o in orgs if isinstance(o, dict) and o.get("id")]
+                if org_names:
+                    jsm_record["organization_name"] = ", ".join(org_names)
+                if org_ids:
+                    jsm_record["organization_id"] = org_ids[0]
 
         # Extracción de SLAs de JSM
         for f_id, f_val in fields.items():

@@ -18,21 +18,13 @@ import pytz
 
 from jira_client import JiraClient
 
-# Lista quirúrgica de campos universales base
-UNIVERSAL_BASE_FIELDS = [
-    "summary", "description", "issuetype", "status", "priority",
-    "resolution", "resolutiondate", "created", "updated", "duedate",
-    "reporter", "assignee", "creator", "parent", "project",
-    "labels", "components", "timetracking", "timeoriginalestimate", "timespent"
-]
+from constants import UNIVERSAL_BASE_FIELDS, LIMA_TZ
 from jira_transformer import JiraTransformer, parse_iso_datetime
 from jira_parallel_extractor import MemorySafeParallelExtractor
 from db import DWRepository, get_dw_connection, dw_cursor
 from alerts import notify_webhook_failure
 
 logger = logging.getLogger(__name__)
-
-LIMA_TZ = pytz.timezone("America/Lima")
 
 default_args = {
     'owner': 'gobierno-ti',

@@ -17,6 +17,12 @@ x-airflow-common: &airflow-common
     JIRA_API_TOKEN: ${JIRA_API_TOKEN}
     DW_CONN_URI: postgresql://${DW_USER:-dw_admin}:${DW_PASSWORD:-dw_pass_gobierno_2026}@postgres-dw:5432/${DW_DB:-jira_dw}
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL}
+    ATLASSIAN_ORG_ID: ${ATLASSIAN_ORG_ID:-}
+    ATLASSIAN_ORG_TOKEN: ${ATLASSIAN_ORG_TOKEN:-}
+    JIRA_ASSETS_WORKSPACE_ID: ${JIRA_ASSETS_WORKSPACE_ID:-ae0390c7-daf0-4efd-8181-99c3b55f1d1c}
+    JIRA_ASSETS_CMDB_SCHEMA_ID: ${JIRA_ASSETS_CMDB_SCHEMA_ID:-8}
+    JSM_REQUEST_TYPE_FIELD_ID: ${JSM_REQUEST_TYPE_FIELD_ID:-customfield_10010}
+    JSM_ORGANIZATIONS_FIELD_ID: ${JSM_ORGANIZATIONS_FIELD_ID:-customfield_10002}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs

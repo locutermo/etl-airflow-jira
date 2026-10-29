@@ -282,3 +282,46 @@ INSERT INTO meta_etl_watermarks (pipeline_name, last_successful_sync, status)
 VALUES ('etl_jira_incremental_sync', '2020-01-01 00:00:00-05', 'SUCCESS')
 ON CONFLICT (pipeline_name) DO NOTHING;
 
+-- =============================================================================
+-- JIRA ASSETS / INSIGHT CMDB (DIMENSIONES Y OBJETOS)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS dim_cmdb_schema (
+    schema_id INTEGER PRIMARY KEY,
+    schema_key VARCHAR(50) NOT NULL,
+    schema_name VARCHAR(150) NOT NULL,
+    description TEXT,
+    object_count INTEGER DEFAULT 0,
+    object_type_count INTEGER DEFAULT 0,
+    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dim_cmdb_object_type (
+    object_type_id INTEGER PRIMARY KEY,
+    schema_id INTEGER REFERENCES dim_cmdb_schema(schema_id) ON DELETE CASCADE,
+    type_name VARCHAR(150) NOT NULL,
+    parent_type_id INTEGER,
+    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS dim_cmdb_object (
+    object_id BIGINT PRIMARY KEY,
+    object_key VARCHAR(50) NOT NULL,
+    workspace_id VARCHAR(80) NOT NULL,
+    schema_id INTEGER REFERENCES dim_cmdb_schema(schema_id) ON DELETE CASCADE,
+    object_type_id INTEGER REFERENCES dim_cmdb_object_type(object_type_id) ON DELETE SET NULL,
+    object_type_name VARCHAR(150),
+    label VARCHAR(255) NOT NULL,
+    status VARCHAR(80),
+    attributes_json JSONB,
+    created_at TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE,
+    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cmdb_object_key ON dim_cmdb_object(object_key);
+CREATE INDEX IF NOT EXISTS idx_cmdb_object_type ON dim_cmdb_object(object_type_id);
+CREATE INDEX IF NOT EXISTS idx_cmdb_object_schema ON dim_cmdb_object(schema_id);
+CREATE INDEX IF NOT EXISTS idx_cmdb_object_label ON dim_cmdb_object(label);
+CREATE INDEX IF NOT EXISTS idx_cmdb_object_attrs_gin ON dim_cmdb_object USING GIN (attributes_json);
+
+

@@ -13,12 +13,18 @@ from requests.auth import HTTPBasicAuth
 
 logger = logging.getLogger(__name__)
 
-UNIVERSAL_BASE_FIELDS = [
-    "summary", "description", "issuetype", "status", "priority",
-    "resolution", "resolutiondate", "created", "updated", "duedate",
-    "reporter", "assignee", "creator", "parent", "project",
-    "labels", "components", "timetracking", "timeoriginalestimate", "timespent"
-]
+from constants import (
+    UNIVERSAL_BASE_FIELDS,
+    JIRA_ASSETS_WORKSPACE_ID,
+    JIRA_ASSETS_API_BASE_URL,
+    ASSETS_PAGE_SIZE,
+    ATLASSIAN_ORG_ID,
+    ATLASSIAN_ORG_TOKEN,
+    ATLASSIAN_ADMIN_API_BASE_URL,
+    HTTP_MAX_RETRIES,
+    HTTP_BASE_BACKOFF_SEC,
+    HTTP_REQUEST_TIMEOUT
+)
 
 class JiraClient:
     """Cliente para interactuar de forma resiliente con Jira Cloud REST API."""
@@ -28,9 +34,9 @@ class JiraClient:
         base_url: Optional[str] = None,
         user_email: Optional[str] = None,
         api_token: Optional[str] = None,
-        max_retries: int = 5,
-        base_backoff_sec: float = 2.0,
-        request_timeout: int = 60
+        max_retries: int = HTTP_MAX_RETRIES,
+        base_backoff_sec: float = HTTP_BASE_BACKOFF_SEC,
+        request_timeout: int = HTTP_REQUEST_TIMEOUT
     ):
         self.base_url = (base_url or os.getenv("JIRA_BASE_URL", "https://integratelperu.atlassian.net")).rstrip('/')
         self.user_email = user_email or os.getenv("JIRA_USER_EMAIL", "")
@@ -60,7 +66,10 @@ class JiraClient:
         """
         Ejecuta una petición HTTP con manejo inteligente de cabecera Retry-After y Backoff exponencial con jitter.
         """
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            url = endpoint
+        else:
+            url = f"{self.base_url}/{endpoint.lstrip('/')}"
         kwargs.setdefault("timeout", self.request_timeout)
 
         for attempt in range(1, self.max_retries + 1):
@@ -372,4 +381,114 @@ class JiraClient:
 
         logger.info(f"Total IDs activos encontrados en Jira para '{project_key}': {len(all_ids)}")
         return all_ids
+
+    # =========================================================================
+    # JIRA ASSETS / INSIGHT CMDB APIS
+    # =========================================================================
+    def get_assets_workspace_id(self) -> str:
+        """Obtiene el ID del workspace de Assets (JSM Insight)."""
+        if JIRA_ASSETS_WORKSPACE_ID:
+            return JIRA_ASSETS_WORKSPACE_ID
+        resp = self._request("GET", "/rest/servicedeskapi/insight/workspace")
+        values = resp.json().get("values", [])
+        if values and "workspaceId" in values[0]:
+            return values[0]["workspaceId"]
+        raise RuntimeError("No se encontró ningún workspaceId de Assets configurado en Jira Cloud.")
+
+    def get_assets_schemas(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lista todos los esquemas de objetos de la CMDB."""
+        ws_id = workspace_id or self.get_assets_workspace_id()
+        url = f"{JIRA_ASSETS_API_BASE_URL}/{ws_id}/v1/objectschema/list"
+        resp = self._request("GET", url)
+        return resp.json().get("values", [])
+
+    def get_assets_object_types(self, schema_id: int, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lista los tipos de objeto (Object Types) pertenecientes a un esquema."""
+        ws_id = workspace_id or self.get_assets_workspace_id()
+        url = f"{JIRA_ASSETS_API_BASE_URL}/{ws_id}/v1/objectschema/{schema_id}/objecttypes"
+        resp = self._request("GET", url)
+        return resp.json()
+
+    def search_assets_objects_aql(
+        self,
+        schema_id: int,
+        aql: Optional[str] = None,
+        workspace_id: Optional[str] = None,
+        batch_size: int = ASSETS_PAGE_SIZE
+    ) -> Generator[List[Dict[str, Any]], None, None]:
+        """
+        Extrae paginadamente los objetos de la CMDB con sus atributos mediante AQL.
+        """
+        ws_id = workspace_id or self.get_assets_workspace_id()
+        url = f"{JIRA_ASSETS_API_BASE_URL}/{ws_id}/v1/object/aql"
+        ql_query = aql or f"objectSchemaId = {schema_id}"
+        start_at = 0
+
+        while True:
+            params = {
+                "startAt": start_at,
+                "maxResults": batch_size,
+                "includeAttributes": "true"
+            }
+            body = {"qlQuery": ql_query}
+            resp = self._request("POST", url, params=params, json=body)
+            data = resp.json()
+            values = data.get("values", [])
+
+            if not values:
+                break
+
+            yield values
+
+            start_at += len(values)
+            if data.get("isLast", False) or len(values) < batch_size:
+                break
+
+    # =========================================================================
+    # ATLASSIAN ADMIN & DIRECTORY API (DIRECTORIO DE CORREOS CORPORATIVOS)
+    # =========================================================================
+    def get_organization_users(
+        self,
+        org_id: Optional[str] = None,
+        org_token: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Consulta el directorio corporativo de identidades de Atlassian Admin API.
+        Permite extraer el correo corporativo real de todos los usuarios sin restricciones de perfil.
+        Endpoint: https://api.atlassian.com/admin/v1/orgs/{orgId}/users
+        """
+        oid = org_id or ATLASSIAN_ORG_ID
+        otoken = org_token or ATLASSIAN_ORG_TOKEN
+        if not oid or not otoken:
+            logger.warning("ATLASSIAN_ORG_ID o ATLASSIAN_ORG_TOKEN no configurados. Omite consulta de Admin Org API.")
+            return []
+
+        url = f"{ATLASSIAN_ADMIN_API_BASE_URL}/orgs/{oid}/users"
+        headers = {
+            "Authorization": f"Bearer {otoken}",
+            "Accept": "application/json"
+        }
+        all_users = []
+        cursor = None
+
+        while True:
+            params = {}
+            if cursor:
+                params["cursor"] = cursor
+
+            resp = requests.get(url, headers=headers, params=params, timeout=self.request_timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            users = data.get("data", [])
+            all_users.extend(users)
+
+            links = data.get("links", {})
+            cursor = links.get("next")
+            if not cursor or not users:
+                break
+
+        logger.info(f"Directorio de Organización Atlassian extraído: {len(all_users)} identidades.")
+        return all_users
+
+
 
